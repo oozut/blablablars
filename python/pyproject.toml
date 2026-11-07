@@ -1,0 +1,29 @@
+[build-system]
+requires = ["maturin>=1.16,<2"]
+build-backend = "maturin"
+
+[project]
+name = "blablablars"
+description = "Python bindings and plugin API for the blablablars text pipeline"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Guillaume", email = "oozut@users.noreply.github.com" }]
+keywords = ["blablablars", "plugins", "extensions", "rust", "pyo3"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "License :: OSI Approved :: Apache Software License",
+    "Typing :: Typed",
+]
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/oozut/blablablars"
+
+[tool.maturin]
+manifest-path = "../crates/blablablars-python/Cargo.toml"
+python-source = "."
+module-name = "blablablars._native"
+features = ["pyo3/extension-module"]
+strip = true

@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Formatting
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --exclude blablablars-python --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --workspace --exclude blablablars-python
+
+  python:
+    name: Python bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: python
+      - name: Install maturin
+        run: pip install "maturin>=1.16,<2"
+      - name: Build and install the extension
+        working-directory: python
+        run: maturin develop --release
+      - name: Tests
+        working-directory: python
+        run: python -m unittest discover -s tests -v
+      - name: End-to-end with the Rust binary
+        run: |
+          cargo build --release -p blablablars-cli
+          target/release/blablablars run "hello brave world" --json \
+            --plugin "python -m blablablars.runtime examples/python/hello_plugin.py"
