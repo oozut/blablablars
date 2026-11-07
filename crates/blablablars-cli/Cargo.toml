@@ -12,10 +12,17 @@ authors.workspace = true
 name = "blablablars"
 path = "src/main.rs"
 
+[features]
+# Embedded CPython: Python plugins run inside this binary. Turn it off with
+# `--no-default-features` for a lean build that only supports child processes.
+default = ["python"]
+python = ["dep:blablablars-pythonhost"]
+
 [dependencies]
 blablablars-core.workspace = true
 clap.workspace = true
 serde_json.workspace = true
+blablablars-pythonhost = { path = "../blablablars-pythonhost", optional = true }
 
 [lints]
 workspace = true

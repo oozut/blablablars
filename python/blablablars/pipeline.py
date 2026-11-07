@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Iterable
 
 from ._native import Pipeline as _NativePipeline
@@ -46,6 +47,26 @@ class Pipeline:
             return json.dumps(payload if result is None else result)
 
         self._native.register(extension_name, list(hooks), callback)
+
+    def register_rust(self, path: str | os.PathLike[str]) -> None:
+        """Load a compiled Rust extension (``.so``/``.dylib``/``.dll``) in-process.
+
+        Same loader as ``blablablars run --rust-plugin``; the extension sees the
+        same hooks as a Python one.
+        """
+        self._native.register_rust_library(os.fspath(path))
+
+    def register_rust_directory(self, directory: str | os.PathLike[str]) -> list[str]:
+        """Load every Rust extension in ``directory``. Returns their names."""
+        return list(self._native.register_rust_directory(os.fspath(directory)))
+
+    def register_process(self, command: str) -> str:
+        """Attach a plugin that runs as its own process and speaks JSON on stdio.
+
+        ``command`` is a command line, e.g.
+        ``"python3 -m blablablars.runtime my_plugin.py"``.
+        """
+        return self._native.register_process(command)
 
     def unregister(self, name: str) -> bool:
         return self._native.unregister(name)

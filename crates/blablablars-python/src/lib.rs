@@ -211,6 +211,42 @@ impl Pipeline {
             .map_err(runtime_error)
     }
 
+    /// Load a compiled Rust extension (`.so`/`.dylib`/`.dll`) into this process.
+    ///
+    /// This is the same loader the `blablablars` binary uses for
+    /// `--rust-plugin`, so a Python user gets the in-process extension the Rust
+    /// application gets.
+    fn register_rust_library(&mut self, path: &str) -> PyResult<()> {
+        let extension = core::DynamicExtension::open(path).map_err(runtime_error)?;
+        self.inner
+            .register(Arc::new(extension))
+            .map_err(runtime_error)
+    }
+
+    /// Load every Rust extension found in `directory`.
+    fn register_rust_directory(&mut self, directory: &str) -> PyResult<Vec<String>> {
+        let extensions =
+            core::DynamicExtension::open_directories([directory.into()]).map_err(runtime_error)?;
+        let mut names = Vec::with_capacity(extensions.len());
+        for extension in extensions {
+            names.push(extension.name().to_string());
+            self.inner
+                .register(Arc::new(extension))
+                .map_err(runtime_error)?;
+        }
+        Ok(names)
+    }
+
+    /// Attach a plugin that runs as its own process and speaks JSON on stdio.
+    fn register_process(&mut self, command_line: &str) -> PyResult<String> {
+        let extension = core::ProcessExtension::spawn_line(command_line).map_err(runtime_error)?;
+        let name = extension.name().to_string();
+        self.inner
+            .register(Arc::new(extension))
+            .map_err(runtime_error)?;
+        Ok(name)
+    }
+
     /// Remove an extension by name. Returns whether one was removed.
     fn unregister(&mut self, name: &str) -> bool {
         self.inner.registry_mut().unregister(name)

@@ -16,7 +16,9 @@
 pub mod error;
 pub mod extension;
 pub mod host;
+pub mod loader;
 pub mod pipeline;
+pub mod plugin_abi;
 pub mod protocol;
 
 pub use error::{CoreError, ExtensionError, Result};
@@ -24,7 +26,9 @@ pub use extension::{
     is_known_hook, known_hooks, Extension, ExtensionInfo, Registry, HOOKS, HOOK_INPUT, HOOK_OUTPUT,
 };
 pub use host::ProcessExtension;
+pub use loader::DynamicExtension;
 pub use pipeline::{analyse, Analysis, Pipeline, Run};
+pub use plugin_abi::ABI_VERSION;
 pub use protocol::{
     PluginDescription, ProtocolError, Request, Response, METHOD_CALL, METHOD_DESCRIBE,
     METHOD_SHUTDOWN, PROTOCOL_VERSION,

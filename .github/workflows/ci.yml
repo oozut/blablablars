@@ -23,6 +23,10 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # The CLI embeds CPython by default, so the runner needs the headers and
+      # libpython at link time.
+      - name: Python headers
+        run: sudo apt-get update && sudo apt-get install -y python3-dev
       - name: Formatting
         run: cargo fmt --all --check
       - name: Clippy
@@ -47,11 +51,21 @@ jobs:
       - name: Build and install the extension
         working-directory: python
         run: maturin develop --release
+      - name: Build the example Rust extension
+        run: cargo build --manifest-path examples/rust-plugin/Cargo.toml --target-dir target/plugin-fixture
       - name: Tests
         working-directory: python
         run: python -m unittest discover -s tests -v
       - name: End-to-end with the Rust binary
         run: |
           cargo build --release -p blablablars-cli
+          echo "--- child process"
           target/release/blablablars run "hello brave world" --json \
             --plugin "python -m blablablars.runtime examples/python/hello_plugin.py"
+          echo "--- in process (Rust cdylib + embedded Python)"
+          target/release/blablablars run "hello brave world" --json \
+            --rust-plugin target/plugin-fixture/debug/libblablablars_example_rust_plugin.so \
+            --python-path python \
+            --python-plugin examples/python/hello_plugin.py
+      - name: CLI tests against the built package
+        run: cargo test -p blablablars-cli

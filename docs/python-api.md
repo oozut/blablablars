@@ -97,6 +97,33 @@ becomes the next handler's payload.
   `pipeline.input`) or an `analysis` object (for `pipeline.output`) is an error,
   because the core cannot continue.
 
+## Attaching extensions from Python
+
+`Pipeline.register` takes a Python object. Two other methods attach extensions
+that live outside Python, using exactly the loaders the binary uses:
+
+```python
+import blablablars
+
+pipeline = blablablars.Pipeline()
+
+pipeline.register_rust("build/libshout.so")            # Rust cdylib, in-process
+pipeline.register_rust_directory("plugins/rust/")      # every .so there; returns names
+pipeline.register_process("python3 -m blablablars.runtime plugin.py")
+```
+
+* `register_rust(path)` / `register_rust_directory(dir)` load a compiled
+  extension into **this** Python process. Same hooks, same JSON payloads, same
+  ordering as a Python callback; a Rust extension is simply faster and can hold
+  Rust state.
+* `register_process(command)` starts a child process and speaks the stdio
+  protocol to it (one JSON round-trip per hook). It returns the plugin's name.
+* Failures — a library that is not an extension, an ABI mismatch, an unknown
+  hook, a command that will not start — raise `RuntimeError` with the core's
+  message, at registration time rather than on the first run.
+
+`pipeline.extensions` lists names in dispatch order, whatever the transport.
+
 ## Running a plugin inside the Rust application
 
 Write a file:
@@ -116,7 +143,21 @@ def annotate(payload):
     return payload
 ```
 
-Point the binary at the runtime (repeat `--plugin` to chain plugins):
+Run it **inside** the binary (no second process; the interpreter is embedded):
+
+```bash
+blablablars run "hello there" --json \
+  --python-path python \
+  --python-plugin examples/python/hello_plugin.py
+```
+
+`--python-plugin` takes a `.py` file or an importable module; `--python-path`
+adds entries to `sys.path` (repeatable, or use `$BLABLABLARS_PYTHON_PATH`).
+`$BLABLABLARS_PLUGINS` lists plugin files to load, using the same variable the
+package's discovery reads.
+
+Or run it beside the binary as a child process (repeat `--plugin` to chain
+plugins):
 
 ```bash
 blablablars run "hello there" --json \

@@ -3,37 +3,45 @@
 ## Layers
 
 ```
-            ┌──────────────────────────┐
-            │ blablablars (binary)     │  CLI: run / hooks / plugins / version
-            └────────────┬─────────────┘
-                         │
-   in-process plugins ───┤  process plugins ──── JSON over stdio ──┐
-                         │                                         │
-            ┌────────────▼─────────────┐              ┌────────────▼─────────────┐
-            │ blablablars-core         │              │ blablablars.runtime      │
-            │ pipeline + registry      │              │ (Python, one plugin)     │
-            └────────────▲─────────────┘              └──────────────────────────┘
-                         │
-            ┌────────────┴─────────────┐
-            │ blablablars-python (PyO3)│  `blablablars._native`
-            └────────────▲─────────────┘
-                         │
-            ┌────────────┴─────────────┐
-            │ blablablars (Python pkg) │  Pipeline / Plugin / discovery / runtime
-            └──────────────────────────┘
+     ┌──────────────────────────────────────────────────────────────┐
+     │ blablablars  (one binary)                                    │
+     │                                                              │
+     │   CLI ──▶ Pipeline ──▶ Registry ──▶ hooks                     │
+     │              │                                               │
+     │              ├── loader + plugin_abi ──▶ Rust cdylib          │
+     │              ├── pythonhost (embedded CPython) ──▶ *.py       │
+     │              └── host ──▶ child process ⇄ JSON on stdio       │
+     └──────────────────────────────────────────────────────────────┘
+
+     blablablars-python (PyO3 module `blablablars._native`)
+       └── the same Pipeline/Registry, reached from Python; it can attach the
+           same Rust cdylibs (loader) and child processes (host)
 ```
 
 Three rules keep this honest:
 
-1. **The core never imports Python.** It takes and returns data. PyO3 lives in
-   its own crate, so the Rust-only build never links libpython.
+1. **The core never imports Python.** It takes and returns data. Embedding lives
+   in `blablablars-pythonhost` and the bindings in `blablablars-python`; neither
+   is a dependency of the core, and a `--no-default-features` build has no
+   interpreter at all.
 2. **Extensions only meet JSON.** `Extension::call(hook, &Value) -> Value` is
-   implemented by Rust extensions, by Python callbacks (behind PyO3), and by
-   child processes (behind the protocol). Adding a fourth kind of extension does
-   not change the pipeline.
+   implemented by Rust libraries loaded with `dlopen`, by embedded Python
+   plugins, by Python callbacks (behind PyO3), and by child processes (behind the
+   protocol). Adding a fourth kind of extension does not change the pipeline.
 3. **One wire shape.** `{"text": ...}` going in and
    `{"analysis": {...}, "trace": [...]}` coming out is what the CLI prints with
    `--json`, what `Pipeline.run_json` returns, and what the protocol carries.
+
+## The four transports
+
+| transport | crate | how it is reached |
+| --- | --- | --- |
+| Rust `cdylib` | `core::loader` + `core::plugin_abi` | `--rust-plugin`, `Pipeline.register_rust` |
+| embedded Python | `blablablars-pythonhost` | `--python-plugin`, discovery entry points |
+| Python callback | `blablablars-python` (PyO3) | `Pipeline.register` |
+| child process | `core::host` | `--plugin`, `Pipeline.register_process` |
+
+All four are documented in [`extensions.md`](extensions.md).
 
 ## A `run` in detail
 
@@ -52,17 +60,22 @@ Failures are typed, never panics: `ExtensionError` for something an extension di
 wrong, `CoreError` for registration and dispatch problems, `ProtocolError` for a
 plugin that misbehaves on the wire.
 
-## Why child processes for plugins
+## Why both in-process and child processes
 
-Embedding CPython in the shipped binary would drag in interpreter startup,
-version pinning and `sys.path` questions for every user, and would make a
-crashing plugin able to take down the host. A long-lived child process per plugin
-gives crash isolation, language freedom (anything that can read stdin and write
-stdout), and no build-time Python requirement. The cost is one request round-trip
-per hook, which is irrelevant for extension work.
+In-process extensions are what most plugin authors want: no serialisation
+round-trip, no extra process, direct access to the shared state the extension was
+configured with. Rust libraries are loaded with `dlopen` behind a versioned C ABI
+(`plugin_abi`), and Python plugins run in an embedded interpreter (`pythonhost`)
+that imports the same `blablablars` package the Python API exposes.
 
-The trade-off is documented in `docs/plugin-protocol.md`: the child may only
-write protocol JSON to stdout; diagnostics belong on stderr.
+The child-process transport remains for the cases in-process loading cannot
+serve: a plugin written in another language, a plugin that must not be able to
+crash or inspect the host, or a build that ships without an interpreter
+(`--no-default-features`). The cost is one JSON round-trip per hook.
+
+Either way the extension sees the same hooks and payloads; only the transport
+changes. The child-process contract is in `docs/plugin-protocol.md`: the child
+may only write protocol JSON to stdout, diagnostics belong on stderr.
 
 ## Where to add the real domain logic
 

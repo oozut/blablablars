@@ -13,14 +13,17 @@ from Python.
 ## Why this shape
 
 * `blablablars-core` has no I/O and no knowledge of Python: it is the product.
-* `blablablars-cli` is the deliverable binary. It stays lean because Python
-  plugins are *child processes* talking JSON over stdio, not an embedded
-  interpreter.
-* `blablablars-python` is a PyO3 extension wrapping the same core, so Python
-  callers get the fast in-process path with no reimplementation.
-* Extensions cross one boundary only: JSON payloads on named hooks. The same
-  payload shape is used in-process (PyO3), out-of-process (stdio protocol) and
-  in the CLI output, so the three cannot drift.
+* `blablablars-cli` is the deliverable binary, and extensions run **inside it**:
+  Rust extensions are `cdylib`s loaded with `dlopen` behind a versioned C ABI,
+  Python plugins run in an embedded interpreter. `--no-default-features` drops
+  the interpreter again.
+* `blablablars-pythonhost` embeds CPython for Python plugins;
+  `blablablars-python` is a PyO3 module wrapping the same core, so Python callers
+  get the fast in-process path with no reimplementation.
+* Extensions cross one boundary only: JSON payloads on named hooks — inside the
+  binary (Rust and Python), inside a Python process (PyO3 callbacks), or over
+  stdio (a child process, for anything else). The same payload shape is used by
+  the CLI output too, so the transports cannot drift.
 
 ## Quick start — Rust
 
@@ -51,7 +54,12 @@ result = blablablars.Pipeline().run("hello brave world")
 print(result.analysis.words, result.analysis.digest)
 ```
 
-## Writing an extension in Python
+## Extensions
+
+Four transports, one contract (hooks + JSON payloads). Everything is documented
+in [`docs/extensions.md`](docs/extensions.md).
+
+**Python, inside the binary** — no Rust needed:
 
 ```python
 from blablablars import HOOK_INPUT, hook
@@ -62,37 +70,58 @@ def shout(payload):
     return payload
 ```
 
-Run it inside the Rust application without touching Rust:
+```bash
+./target/release/blablablars run "hello there" \
+  --python-path python \
+  --python-plugin examples/python/hello_plugin.py
+```
+
+**Rust, inside the binary** — a `cdylib` + `export_plugin!`; see
+[`examples/rust-plugin`](examples/rust-plugin):
+
+```bash
+make example
+./target/release/blablablars run "hello there" \
+  --rust-plugin target/plugin-fixture/debug/libblablablars_example_rust_plugin.so
+```
+
+**From Python**, all of it at once:
+
+```python
+import blablablars
+
+pipeline = blablablars.Pipeline()
+pipeline.register(my_plugin)                       # Python callback
+pipeline.register_rust("libshout.so")              # Rust cdylib, in-process
+pipeline.register_process("python3 -m blablablars.runtime plugin.py")
+```
+
+**Any other language**, as a child process:
 
 ```bash
 ./target/release/blablablars run "hello there" \
   --plugin "python -m blablablars.runtime examples/python/hello_plugin.py"
 ```
 
-or inside Python, in-process:
-
-```python
-import blablablars
-
-pipeline = blablablars.Pipeline([my_plugin])
-result = pipeline.run("hello there")
-```
-
-Details: [`docs/python-api.md`](docs/python-api.md).
+`make demo` runs the child-process example, `make demo-inprocess` runs the Rust
+and embedded-Python extensions inside one binary.
 
 ## Repository layout
 
 ```
 crates/
-  blablablars-core/   engine, hooks, registry, plugin protocol + host adapter
-  blablablars-cli/    the `blablablars` binary
-  blablablars-python/ PyO3 module `blablablars._native`
+  blablablars-core/      engine, hooks, registry; dynamic loader (C ABI) and
+                         the child-process protocol + host adapter
+  blablablars-cli/       the `blablablars` binary
+  blablablars-pythonhost/ embedded CPython: runs Python plugins in-process
+  blablablars-python/    PyO3 module `blablablars._native`
 python/
-  blablablars/        Python package: Pipeline, Plugin, discovery, runtime
-  tests/              unittest suite (26 tests)
+  blablablars/           Python package: Pipeline, Plugin, discovery, runtime
+  tests/                 unittest suite
 examples/
-  python/             a runnable Python plugin
-docs/                 architecture, Python API, wire protocol
+  python/                a runnable Python plugin
+  rust-plugin/           a runnable Rust extension (cdylib, own workspace)
+docs/                    architecture, extensions, Python API, wire protocol
 ```
 
 ## Hooks
@@ -110,7 +139,12 @@ A handler returning `None` leaves the payload untouched.
 ```bash
 make test          # cargo test + cargo fmt --check + cargo clippy -D warnings
 make python-test   # unittest suite against the built extension
+make example       # build the example Rust extension (a real cdylib)
 ```
+
+The Rust tests build `examples/rust-plugin` on demand and load it in-process;
+the CLI tests skip the embedded-Python cases until `maturin develop` has produced
+`python/blablablars/_native*.so`.
 
 ## License
 

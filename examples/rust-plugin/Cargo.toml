@@ -1,0 +1,17 @@
+[package]
+name = "blablablars-example-rust-plugin"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+# Its own workspace: the repository excludes this directory so the fixture is
+# only built when a test (or the `make example` target) asks for it.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+blablablars-core = { path = "../../crates/blablablars-core" }
+serde_json = "1"

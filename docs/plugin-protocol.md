@@ -13,6 +13,12 @@ the native module as `blablablars.PROTOCOL_VERSION`.
 The host implementation is `crates/blablablars-core/src/host.rs`; the reference
 implementation is `python/blablablars/runtime.py`. Any language can implement it.
 
+The same JSON documents are also the in-process contracts: `describe` answers a
+`PluginDescription` and `call` answers a `Response`, which is what a Rust
+`cdylib` extension returns through `plugin_abi` (with `id` fixed at `0`) and what
+the embedded Python host calls a plugin with. One shape, three transports, no
+translation layer to keep in step.
+
 ## Handshake
 
 On startup the host sends:
