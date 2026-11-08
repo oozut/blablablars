@@ -63,15 +63,18 @@ are typed into the focused window.
 ```bash
 blablablars config init                 # every setting, at its defaults
 blablablars models                      # what is in the model directory
+blablablars engines                     # which backends this machine can run
 blablablars dictate --toggle            # bind this to a key
+blablablars dictate --toggle --stream    # ...and type as you speak
 ```
 
 Capture, transcription, cleanup and delivery are four replaceable pieces joined
 in one place: the recorder is a child process writing raw PCM (no audio library
-to link), the transcriber is `whisper-cli` or any command, cleanup is pure
-functions, and delivery is `xdotool`/`wtype`/your own command/stdout. Two hooks —
-`transcription.raw` and `transcription.text` — let extensions rewrite the
-transcript. See [`docs/dictation.md`](docs/dictation.md).
+to link, so Linux, macOS and Windows all work), the transcriber is whisper.cpp,
+NVIDIA Parakeet, ONNX Runtime (through sherpa-onnx) or any command, cleanup is
+pure functions, and delivery is paste/`xdotool`/`wtype`/your own command/stdout.
+Two hooks — `transcription.raw` and `transcription.text` — let extensions rewrite
+the transcript. See [`docs/dictation.md`](docs/dictation.md).
 
 ## Extensions
 

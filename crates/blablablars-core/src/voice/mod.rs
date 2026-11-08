@@ -23,10 +23,12 @@ pub mod config;
 pub mod inject;
 pub mod models;
 pub mod platform;
+pub mod stream;
 pub mod transcribe;
 
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -40,6 +42,7 @@ pub use capture::Recording;
 pub use config::{VoiceConfig, ENV_CONFIG};
 pub use inject::{Injector, KeyInjector, StdoutInjector};
 pub use models::Model;
+pub use stream::{CommandEngine, Committer, LiveEngine, WindowEngine};
 pub use transcribe::Transcriber;
 
 /// One dictation, from audio to the text that was typed.
@@ -77,8 +80,9 @@ impl DictationRun {
 /// Recording, transcription, cleanup and typing, configured once.
 pub struct Dictation {
     config: VoiceConfig,
-    model: String,
-    transcriber: Box<dyn Transcriber>,
+    model: Model,
+    /// Shared so a streaming session can re-run the same backend over a window.
+    transcriber: Arc<dyn Transcriber>,
     pipeline: Pipeline,
 }
 
@@ -104,11 +108,14 @@ impl Dictation {
             models::resolve(&config.models.directory, wanted)
                 .unwrap_or_else(|_| Model::unresolved(wanted))
         };
-        let transcriber =
-            transcribe::from_config(&config.transcriber, &config.language, &resolved)?;
+        let transcriber: Arc<dyn Transcriber> = Arc::from(transcribe::from_config(
+            &config.transcriber,
+            &config.language,
+            &resolved,
+        )?);
         Ok(Self {
             config,
-            model: resolved.name,
+            model: resolved,
             transcriber,
             pipeline,
         })
@@ -120,7 +127,7 @@ impl Dictation {
 
     /// The model name in use.
     pub fn model(&self) -> &str {
-        &self.model
+        &self.model.name
     }
 
     /// What is doing the transcription, for logs.
@@ -142,14 +149,37 @@ impl Dictation {
 
         let started = Instant::now();
         let raw = self.transcriber.transcribe(audio)?;
-        let mut trace = Vec::new();
+        let (raw, text, trace) = self.polish(raw, audio.seconds())?;
 
+        Ok(DictationRun {
+            raw,
+            text,
+            model: self.model.name.clone(),
+            transcriber: self.transcriber.describe(),
+            audio_seconds: audio.seconds(),
+            elapsed: started.elapsed(),
+            trace,
+        })
+    }
+
+    /// Clean up `raw` and run the two transcript hooks on it.
+    ///
+    /// Shared by the batch path and the streaming one, so a partial line goes
+    /// through exactly the same dictionary, fillers and rewriters as a whole
+    /// utterance. Returns the text after the raw hook, the final text, and the
+    /// extensions that ran.
+    pub fn polish(
+        &self,
+        raw: String,
+        audio_seconds: f64,
+    ) -> Result<(String, String, Vec<String>), CoreError> {
+        let mut trace = Vec::new();
         let raw = self.dispatch(
             HOOK_TRANSCRIPT_RAW,
             json!({
                 "text": raw,
-                "audio_seconds": audio.seconds(),
-                "model": self.model,
+                "audio_seconds": audio_seconds,
+                "model": self.model.name,
                 "transcriber": self.transcriber.describe(),
             }),
             &mut trace,
@@ -160,16 +190,33 @@ impl Dictation {
             &self.config.cleanup.options(),
         );
         let text = self.dispatch(HOOK_TRANSCRIPT_TEXT, json!({ "text": text }), &mut trace)?;
+        Ok((raw, text, trace))
+    }
 
-        Ok(DictationRun {
-            raw,
-            text,
-            model: self.model.clone(),
-            transcriber: self.transcriber.describe(),
-            audio_seconds: audio.seconds(),
-            elapsed: started.elapsed(),
-            trace,
-        })
+    /// The streaming engine this config selects.
+    ///
+    /// A `stream.command` that streams partial results itself wins; otherwise
+    /// the ordinary backend is re-run over a trailing window, which is the only
+    /// way to stream with a batch model.
+    pub fn live_engine(&self) -> Result<Box<dyn LiveEngine>, CoreError> {
+        if !self.config.stream.command.is_empty() {
+            let timeout = Duration::from_secs(self.config.stream.command_timeout_seconds);
+            return Ok(Box::new(stream::CommandEngine::start(
+                &self.config.stream.command,
+                &self.model,
+                &self.config.language,
+                timeout,
+            )?));
+        }
+        Ok(Box::new(stream::WindowEngine::new(
+            Arc::clone(&self.transcriber),
+            Duration::from_millis(self.config.stream.window_ms),
+        )))
+    }
+
+    /// True when this config wants the words as they are spoken.
+    pub fn streaming(&self) -> bool {
+        self.config.stream.enabled
     }
 
     /// Read a WAV file and run it through the same path as a recording.
@@ -184,6 +231,16 @@ impl Dictation {
         let mut payload = text.to_string();
         payload.push_str(&self.config.output.trailing);
         injector.inject(&payload)?;
+        Ok(injector.describe())
+    }
+
+    /// Type one streamed chunk exactly as given.
+    ///
+    /// `output.trailing` is not added here: a streaming session types a space
+    /// after every word, so a second separator would double it.
+    pub fn deliver_chunk(&self, text: &str) -> Result<String, CoreError> {
+        let injector = inject::from_config(&self.config.output)?;
+        injector.inject_chunk(text)?;
         Ok(injector.describe())
     }
 

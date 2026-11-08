@@ -75,6 +75,18 @@ pub struct DictateArgs {
     #[arg(long)]
     pub no_cleanup: bool,
 
+    /// Type the words as you speak them instead of all at once when you stop.
+    #[arg(long)]
+    pub stream: bool,
+
+    /// How often a streaming session transcribes and types, in milliseconds.
+    #[arg(long, value_name = "MS")]
+    pub stream_step: Option<u64>,
+
+    /// How much trailing audio a streaming session shows the model.
+    #[arg(long, value_name = "MS")]
+    pub stream_window: Option<u64>,
+
     /// Report what happened as JSON instead of typing anything.
     #[arg(long)]
     pub json: bool,
@@ -186,6 +198,20 @@ pub fn run(args: DictateArgs) -> Result<(), CoreError> {
     if args.print || args.json {
         config.output.kind = OutputKind::Stdout;
     }
+    if args.stream {
+        config.stream.enabled = true;
+    }
+    if let Some(step) = args.stream_step {
+        config.stream.step_ms = step;
+    }
+    if let Some(window) = args.stream_window {
+        config.stream.window_ms = window;
+    }
+    // A JSON report describes one finished transcription, so `--json` takes the
+    // batch path even when streaming is on in the config.
+    if args.json {
+        config.stream.enabled = false;
+    }
 
     let pipeline = plugins::build(&args.attach.options()?)?;
     let dictation = Dictation::with_pipeline(config, args.model.as_deref(), pipeline)?;
@@ -203,48 +229,230 @@ pub fn run(args: DictateArgs) -> Result<(), CoreError> {
     }
 
     if args.record_child {
-        return record_session(&args, dictation);
+        return record_session(dictation, args.json);
     }
 
     if let Some(seconds) = args.seconds {
-        return record_for(&args, dictation, seconds);
+        return record_for(dictation, args.json, seconds);
     }
 
-    record_until_enter(&args, dictation)
+    record_until_enter(dictation, args.json)
 }
 
 /// Record for a fixed duration.
-fn record_for(args: &DictateArgs, dictation: Dictation, seconds: f64) -> Result<(), CoreError> {
+fn record_for(dictation: Dictation, json: bool, seconds: f64) -> Result<(), CoreError> {
     if seconds <= 0.0 {
         return Err(CoreError::Voice(
             "`--seconds` must be greater than zero".to_string(),
         ));
     }
-    let started = Instant::now();
-    let recording = Recording::start(&dictation.config().capture)?;
-    dictation.notify("recording");
+    let mut session = Live::start(dictation, json)?;
+    let deadline = Instant::now() + Duration::from_secs_f64(seconds);
     eprintln!("recording for {seconds}s...");
-    std::thread::sleep(Duration::from_secs_f64(seconds));
-    let audio = recording.stop()?;
-    dictation.notify("transcribing");
-    let run = dictation.transcribe(&audio)?;
-    report(args, &dictation, &run, started)
+    while Instant::now() < deadline {
+        session.pump()?;
+    }
+    session.finish()
 }
 
 /// Record until the user presses Enter: the fastest way to try the setup.
-fn record_until_enter(args: &DictateArgs, dictation: Dictation) -> Result<(), CoreError> {
+fn record_until_enter(dictation: Dictation, json: bool) -> Result<(), CoreError> {
     use std::io::BufRead as _;
 
-    let started = Instant::now();
-    let recording = Recording::start(&dictation.config().capture)?;
-    dictation.notify("recording");
+    let session = Live::start(dictation, json)?;
     eprintln!("recording — press Enter to stop");
     let mut line = String::new();
     std::io::stdin().lock().read_line(&mut line)?;
-    let audio = recording.stop()?;
-    dictation.notify("transcribing");
-    let run = dictation.transcribe(&audio)?;
-    report(args, &dictation, &run, started)
+    session.finish()
+}
+
+/// A recording in progress, either streamed or transcribed at the end.
+///
+/// Both shapes are the same object so the three entry points (`--seconds`,
+/// Enter, the shortcut) do not each grow a streaming branch. In batch mode
+/// [`pump`] does nothing and [`finish`] does the whole transcription at once.
+struct Live {
+    dictation: Dictation,
+    /// `Some` until the session ends and the audio is taken.
+    recording: Option<Recording>,
+    /// `Some` when the words are typed while the user speaks.
+    stream: Option<Streaming>,
+    started: Instant,
+    /// `--json`: one report at the end instead of typing.
+    json: bool,
+}
+
+struct Streaming {
+    engine: Box<dyn voice::LiveEngine>,
+    committer: voice::Committer,
+    next_step: Instant,
+    /// Steps that actually asked the model something, for the final report.
+    steps: usize,
+}
+
+impl Live {
+    fn start(dictation: Dictation, json: bool) -> Result<Self, CoreError> {
+        let recording = Recording::start(&dictation.config().capture)?;
+        dictation.notify("recording");
+        let stream = if dictation.streaming() {
+            let engine = dictation.live_engine()?;
+            eprintln!("typing as you speak with {}", engine.describe());
+            let step = Duration::from_millis(dictation.config().stream.step_ms);
+            Some(Streaming {
+                engine,
+                committer: voice::Committer::new(),
+                next_step: Instant::now() + step,
+                steps: 0,
+            })
+        } else {
+            None
+        };
+        Ok(Self {
+            dictation,
+            recording: Some(recording),
+            stream,
+            started: Instant::now(),
+            json,
+        })
+    }
+
+    /// Do whatever this mode owes the user right now; returns after at most one
+    /// step, so the caller keeps owning the loop (and the stop condition).
+    fn pump(&mut self) -> Result<(), CoreError> {
+        let Some(stream) = self.stream.as_mut() else {
+            // Batch mode has nothing to do until the user stops talking.
+            std::thread::sleep(Duration::from_millis(50));
+            return Ok(());
+        };
+        if Instant::now() < stream.next_step {
+            std::thread::sleep(Duration::from_millis(20));
+            return Ok(());
+        }
+        stream.next_step += Duration::from_millis(self.dictation.config().stream.step_ms);
+
+        let (chunk, elapsed) = match self.recording.as_mut() {
+            Some(recording) => (recording.drain(), recording.elapsed()),
+            None => return Ok(()),
+        };
+        if chunk.is_empty() {
+            // Silent steps are cheap for the model but not free, so only call it
+            // when there is new audio to look at. A step that called nothing is
+            // not a step.
+            return Ok(());
+        }
+        stream.steps += 1;
+        let hypothesis = stream.engine.step(&chunk)?;
+        let (_, text, _) = self.dictation.polish(hypothesis, elapsed.as_secs_f64())?;
+        let delta = stream.committer.push(&text);
+        if std::env::var_os("BLABLABLARS_DEBUG").is_some() {
+            // Tuning a window is guesswork without this: which step saw what,
+            // and which words it was allowed to type.
+            eprintln!(
+                "step {} at {:.1}s: heard {:?} -> {:?}",
+                stream.steps,
+                elapsed.as_secs_f64(),
+                text,
+                delta
+            );
+        }
+        if delta.is_empty() {
+            return Ok(());
+        }
+        // One space after every chunk: the words were not spoken with the
+        // `output.trailing` separator, and `deliver_chunk` never adds one.
+        self.dictation.deliver_chunk(&format!("{delta} "))?;
+        stream.engine.note_committed(&stream.committer.committed());
+        Ok(())
+    }
+
+    /// Stop recording and type whatever is left.
+    ///
+    /// A failure notifies the user's `feedback.command` before it is returned,
+    /// because at this point the shortcut launcher has already let go.
+    fn finish(mut self) -> Result<(), CoreError> {
+        match self.run_finish() {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.dictation.notify("error");
+                Err(error)
+            }
+        }
+    }
+
+    fn run_finish(&mut self) -> Result<(), CoreError> {
+        let recording = self
+            .recording
+            .take()
+            .ok_or_else(|| CoreError::Voice("the recording was already stopped".to_string()))?;
+        let whole = recording.stop()?;
+        let Some(mut stream) = self.stream.take() else {
+            self.dictation.notify("transcribing");
+            let run = self.dictation.transcribe(&whole)?;
+            if self.json {
+                println!("{}", serde_json::to_string_pretty(&run.to_json())?);
+                return Ok(());
+            }
+            return report_now(&run, &self.dictation, self.started);
+        };
+
+        self.dictation.notify("transcribing");
+        let hypothesis = stream.engine.finish(&whole)?;
+        let (_, text, _) = self.dictation.polish(hypothesis, whole.seconds())?;
+        let rest = stream.committer.finish(&text);
+        if !rest.is_empty() {
+            self.dictation.deliver_chunk(&rest)?;
+        }
+        self.dictation.notify("done");
+
+        let typed = stream.committer.committed();
+        if typed.is_empty() {
+            eprintln!(
+                "nothing was transcribed from {:.1}s of audio ({}); nothing was typed",
+                whole.seconds(),
+                stream.engine.describe()
+            );
+            return Ok(());
+        }
+        // A streamed transcript is many `print!` calls, so end the line.
+        if self.dictation.config().output.kind == OutputKind::Stdout {
+            println!();
+        }
+        eprintln!(
+            "{:.1}s of audio -> {} words in {:.0} ms with {} ({} steps)",
+            whole.seconds(),
+            voice::stream::words(&typed).len(),
+            self.started.elapsed().as_millis(),
+            stream.engine.describe(),
+            stream.steps
+        );
+        Ok(())
+    }
+}
+
+/// Report a finished batch transcription.
+fn report_now(
+    run: &blablablars_core::DictationRun,
+    dictation: &Dictation,
+    started: Instant,
+) -> Result<(), CoreError> {
+    if run.text.is_empty() {
+        dictation.notify("done");
+        eprintln!(
+            "nothing was transcribed from {:.1}s of audio ({}); nothing was typed",
+            run.audio_seconds, run.transcriber
+        );
+        return Ok(());
+    }
+    let via = dictation.deliver(&run.text)?;
+    dictation.notify("done");
+    eprintln!(
+        "{:.1}s of audio -> {} characters in {:.0} ms with {} via {via}",
+        run.audio_seconds,
+        run.text.chars().count(),
+        started.elapsed().as_millis(),
+        run.transcriber
+    );
+    Ok(())
 }
 
 /// Transcribe, then type (or print) the result.
@@ -331,6 +539,15 @@ fn spawn_recorder(args: &DictateArgs) -> Result<(), CoreError> {
     if args.no_cleanup {
         command.arg("--no-cleanup");
     }
+    if args.stream {
+        command.arg("--stream");
+    }
+    if let Some(step) = args.stream_step {
+        command.arg("--stream-step").arg(step.to_string());
+    }
+    if let Some(window) = args.stream_window {
+        command.arg("--stream-window").arg(window.to_string());
+    }
     command.args(args.attach.to_flags());
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::null());
@@ -383,7 +600,7 @@ struct Session {
 }
 
 /// The detached recorder: listen, capture, and transcribe on stop.
-fn record_session(args: &DictateArgs, dictation: Dictation) -> Result<(), CoreError> {
+fn record_session(dictation: Dictation, json: bool) -> Result<(), CoreError> {
     let path = session_file()?;
 
     // Two recorders on one machine would fight over the microphone, and the
@@ -404,43 +621,33 @@ fn record_session(args: &DictateArgs, dictation: Dictation) -> Result<(), CoreEr
         .map_err(|error| CoreError::Voice(format!("cannot open the session socket: {error}")))?
         .port();
 
-    let recording = Recording::start(&dictation.config().capture)?;
+    let mut live = Live::start(dictation, json)?;
     let session = Session {
         port,
         token: make_token(),
     };
     write_session(&path, &session)?;
     let _guard = SessionGuard(path);
-    dictation.notify("recording");
 
     listener
         .set_nonblocking(true)
         .map_err(|error| CoreError::Voice(format!("cannot watch the session socket: {error}")))?;
 
-    let started = Instant::now();
     loop {
         if serve_once(&listener, &session)? {
             break;
         }
-        if recording.at_limit() {
+        if live.recording.as_ref().is_some_and(Recording::at_limit) {
             eprintln!(
                 "recording reached the {:.0}s limit in the config",
-                dictation.config().capture.max_seconds
+                live.dictation.config().capture.max_seconds
             );
             break;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        live.pump()?;
     }
 
-    let audio = recording.stop()?;
-    dictation.notify("transcribing");
-    match dictation.transcribe(&audio) {
-        Ok(run) => report(args, &dictation, &run, started),
-        Err(error) => {
-            dictation.notify("error");
-            Err(error)
-        }
-    }
+    live.finish()
 }
 
 /// Answer every connection that arrived since the last look. `true` when the

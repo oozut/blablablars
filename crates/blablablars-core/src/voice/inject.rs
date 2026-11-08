@@ -25,6 +25,15 @@ pub trait Injector: Send + Sync {
 
     /// Deliver `text` exactly as given.
     fn inject(&self, text: &str) -> Result<(), CoreError>;
+
+    /// Deliver one piece of a streamed transcript.
+    ///
+    /// The difference only shows for terminals and files: `inject` ends the
+    /// line, because a finished dictation is a finished line, while a streamed
+    /// chunk has more words coming and must not start a new one.
+    fn inject_chunk(&self, text: &str) -> Result<(), CoreError> {
+        self.inject(text)
+    }
 }
 
 /// Build the injector the config selects.
@@ -269,6 +278,14 @@ impl Injector for StdoutInjector {
         if !text.ends_with('\n') {
             writeln!(stdout)?;
         }
+        stdout.flush()?;
+        Ok(())
+    }
+
+    fn inject_chunk(&self, text: &str) -> Result<(), CoreError> {
+        use std::io::Write;
+        let mut stdout = std::io::stdout().lock();
+        write!(stdout, "{text}")?;
         stdout.flush()?;
         Ok(())
     }

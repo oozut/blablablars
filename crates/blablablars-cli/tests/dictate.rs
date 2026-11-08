@@ -87,6 +87,35 @@ output:
         path
     }
 
+    /// A config for a live session: a capture that keeps trickling audio, a
+    /// streaming block, and an output that records what was typed.
+    fn streaming_config(&self, extra: &str) -> PathBuf {
+        let typed = self.path("typed.txt");
+        let config = format!(
+            r#"language: en
+capture:
+  kind: command
+  argv: ["sh", "-c", "while true; do head -c 6400 /dev/zero; sleep 0.1; done"]
+models:
+  default: whisper-large-v3-turbo
+cleanup: true
+output:
+  kind: command
+  argv: ["sh", "-c", "printf '%s' \"$1\" >> \"$0\"", "{typed}", "{{text}}"]
+{extra}"#,
+            typed = typed.display()
+        );
+        let path = self.path("voice.yml");
+        std::fs::write(&path, config).unwrap();
+        path
+    }
+
+    fn script(&self, name: &str, body: &str) -> PathBuf {
+        let path = self.path(name);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
     fn typed(&self) -> String {
         std::fs::read_to_string(self.path("typed.txt")).unwrap_or_default()
     }
@@ -179,6 +208,53 @@ fn a_file_without_speech_transcribes_to_nothing_and_types_nothing() {
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(sandbox.typed(), "");
     assert!(stderr(&output).contains("nothing was transcribed"));
+}
+
+#[test]
+fn the_shortcut_streams_when_it_is_asked_for() {
+    let sandbox = Sandbox::new("togglestream");
+    let config = sandbox.config("good morning");
+    let typed = sandbox.path("typed.txt");
+    let config = config.to_str().unwrap().to_string();
+    let flags = [
+        "dictate",
+        "--config",
+        &config,
+        "--toggle",
+        "--stream",
+        "--stream-step",
+        "100",
+        "--stream-window",
+        "1500",
+    ];
+
+    let start = sandbox.run(&flags);
+    assert!(start.status.success(), "{}", stderr(&start));
+    std::thread::sleep(Duration::from_millis(400));
+
+    let stop = sandbox.run(&flags);
+    assert!(stop.status.success(), "{}", stderr(&stop));
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline && !typed.exists() {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(sandbox.typed(), "Good morning.");
+
+    // The detached recorder got the streaming flags too. Its own report goes to
+    // the log, because the press that stopped it has already let go.
+    let log = sandbox.path("state/blablablars/dictate.log");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut report = String::new();
+    while Instant::now() < deadline {
+        report = std::fs::read_to_string(&log).unwrap_or_default();
+        if report.contains("steps") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(report.contains("over the last 1.5s"), "{report}");
+    assert!(report.contains("(1 steps)"), "{report}");
 }
 
 #[test]
@@ -406,4 +482,198 @@ fn a_whisper_backend_without_a_model_says_so_and_offers_a_way_out() {
     let message = stderr(&output);
     assert!(message.contains("no models"), "{message}");
     assert!(message.contains("huggingface.co"), "{message}");
+}
+
+#[test]
+fn a_streaming_session_types_the_words_as_they_settle() {
+    let sandbox = Sandbox::new("stream");
+    let config = sandbox.streaming_config(
+        r#"transcriber:
+  kind: command
+  argv: ["printf", 'hello there']
+stream:
+  enabled: true
+  step_ms: 200
+  window_ms: 1000
+"#,
+    );
+
+    let output = sandbox.run(&[
+        "dictate",
+        "--config",
+        config.to_str().unwrap(),
+        "--seconds",
+        "2",
+    ]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    // The first step has nothing to compare against and the last word is always
+    // held back, so what was typed is exactly the settled transcript.
+    assert_eq!(sandbox.typed(), "Hello there.");
+    assert!(
+        stderr(&output).contains("typing as you speak"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(stderr(&output).contains("steps"), "{}", stderr(&output));
+}
+
+#[test]
+fn a_streaming_program_can_drive_the_session_itself() {
+    let sandbox = Sandbox::new("streamcmd");
+    // The program reads PCM from stdin and prints one whole hypothesis per
+    // chunk, then a better one when the audio stops.
+    let engine = sandbox.script(
+        "engine.sh",
+        r#"while [ "$(dd bs=6400 count=1 2>/dev/null | wc -c)" -gt 0 ]; do
+  echo '{"text": "one two"}'
+  sleep 0.05
+done
+echo '{"text": "one two three"}'
+"#,
+    );
+    let config = sandbox.streaming_config(&format!(
+        r#"transcriber:
+  kind: command
+  argv: ["printf", 'unused']
+stream:
+  enabled: true
+  step_ms: 200
+  window_ms: 1000
+  command: ["sh", "{}"]
+"#,
+        engine.display()
+    ));
+
+    let output = sandbox.run(&[
+        "dictate",
+        "--config",
+        config.to_str().unwrap(),
+        "--seconds",
+        "1",
+    ]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(sandbox.typed(), "One two three.");
+    assert!(
+        stderr(&output).contains("stream (sh"),
+        "the report names the streaming program: {}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn a_streaming_session_can_be_configured_from_the_command_line() {
+    let sandbox = Sandbox::new("streamflags");
+    let config = sandbox.streaming_config(
+        r#"transcriber:
+  kind: command
+  argv: ["printf", 'hello there']
+"#,
+    );
+
+    let output = sandbox.run(&[
+        "dictate",
+        "--config",
+        config.to_str().unwrap(),
+        "--seconds",
+        "1",
+        "--stream",
+        "--stream-step",
+        "200",
+        "--stream-window",
+        "600",
+    ]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(sandbox.typed(), "Hello there.");
+}
+
+#[test]
+fn streamed_words_reach_stdout_as_one_line() {
+    let sandbox = Sandbox::new("streamout");
+    let config = sandbox.streaming_config(
+        r#"transcriber:
+  kind: command
+  argv: ["printf", 'hello there']
+stream:
+  enabled: true
+  step_ms: 200
+  window_ms: 1000
+"#,
+    );
+
+    let output = sandbox.run(&[
+        "dictate",
+        "--config",
+        config.to_str().unwrap(),
+        "--seconds",
+        "1",
+        "--print",
+    ]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    // Several chunks, one line: a streamed dictation is a sentence, not a list.
+    assert_eq!(stdout(&output), "Hello there.\n");
+}
+
+#[test]
+fn json_takes_the_batch_path_even_when_streaming_is_configured() {
+    let sandbox = Sandbox::new("streamjson");
+    let config = sandbox.streaming_config(
+        r#"transcriber:
+  kind: command
+  argv: ["printf", 'hello there']
+stream:
+  enabled: true
+  step_ms: 200
+  window_ms: 1000
+"#,
+    );
+
+    let output = sandbox.run(&[
+        "dictate",
+        "--config",
+        config.to_str().unwrap(),
+        "--seconds",
+        "1",
+        "--json",
+    ]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let report: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(report["text"], "Hello there.");
+    assert_eq!(sandbox.typed(), "", "a report types nothing");
+}
+
+#[test]
+fn the_engine_list_names_every_backend_and_whether_it_is_installed() {
+    let sandbox = Sandbox::new("engines");
+    let config = sandbox.config("hello");
+
+    let output = sandbox.run(&["engines", "--config", config.to_str().unwrap(), "--json"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let report: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+    let engines = report["engines"].as_array().unwrap();
+    let kinds: Vec<&str> = engines
+        .iter()
+        .map(|engine| engine["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["whisper-cli", "parakeet", "sherpa-onnx", "command"],
+        "every backend is listed"
+    );
+    // Whatever this machine has, the answer is a boolean, not a mystery.
+    for engine in engines {
+        assert!(engine["installed"].is_boolean());
+        assert!(engine["configured"].is_boolean());
+    }
+    let configured: Vec<&str> = engines
+        .iter()
+        .filter(|engine| engine["configured"] == true)
+        .map(|engine| engine["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(configured, ["command"], "the config's backend is marked");
 }

@@ -13,6 +13,7 @@
 
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::error::CoreError;
@@ -28,7 +29,13 @@ const STOP_GRACE: Duration = Duration::from_millis(750);
 pub struct Recording {
     program: String,
     child: Child,
-    audio_reader: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+    /// Everything captured so far, filled by the reader thread. Shared so a
+    /// streaming session can look at the last few seconds without waiting for
+    /// the recording to end.
+    audio: Arc<Mutex<Vec<u8>>>,
+    /// How much of `audio` the caller has already been given by [`drain`].
+    drained: usize,
+    audio_reader: Option<std::thread::JoinHandle<std::io::Result<()>>>,
     stderr_reader: Option<std::thread::JoinHandle<Vec<u8>>>,
     started: Instant,
     max_seconds: f64,
@@ -73,26 +80,27 @@ impl Recording {
         let mut stderr = child.stderr.take().expect("stderr is piped");
         let budget = byte_budget(config.max_seconds);
 
+        let audio = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&audio);
         let audio_reader = std::thread::spawn(move || {
-            let mut buffer = Vec::new();
             let mut chunk = [0u8; 8192];
             loop {
                 match stdout.read(&mut chunk) {
                     Ok(0) => break,
                     Ok(read) => {
-                        buffer.extend_from_slice(&chunk[..read]);
-                        if buffer.len() >= budget {
-                            // Keep the pipe moving but stop growing: the session
-                            // cap has been reached and the caller will stop it.
-                            buffer.truncate(budget);
-                            continue;
+                        let mut buffer = sink.lock().unwrap_or_else(|error| error.into_inner());
+                        if buffer.len() < budget {
+                            let room = budget - buffer.len();
+                            buffer.extend_from_slice(&chunk[..read.min(room)]);
                         }
+                        // Past the cap the pipe keeps being drained, so the
+                        // producer never blocks; the caller is about to stop it.
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(error) => return Err(error),
                 }
             }
-            Ok(buffer)
+            Ok(())
         });
 
         let stderr_reader = std::thread::spawn(move || {
@@ -104,6 +112,8 @@ impl Recording {
         Ok(Self {
             program,
             child,
+            audio,
+            drained: 0,
             audio_reader: Some(audio_reader),
             stderr_reader: Some(stderr_reader),
             started: Instant::now(),
@@ -124,6 +134,22 @@ impl Recording {
     /// True when the capture cap has been reached.
     pub fn at_limit(&self) -> bool {
         self.started.elapsed().as_secs_f64() >= self.max_seconds
+    }
+
+    /// The audio captured since the last call, for a streaming session.
+    ///
+    /// Nothing is taken twice: the full recording is still returned by
+    /// [`stop`], so a streaming session can type as it goes and still hand the
+    /// final transcript the whole utterance.
+    pub fn drain(&mut self) -> Audio {
+        let buffer = self.audio.lock().unwrap_or_else(|error| error.into_inner());
+        if self.drained >= buffer.len() {
+            return Audio::new(WHISPER_RATE, Vec::new());
+        }
+        let bytes = buffer[self.drained..].to_vec();
+        self.drained = buffer.len();
+        drop(buffer);
+        Audio::from_s16le(WHISPER_RATE, &bytes)
     }
 
     /// Stop recording and return what was captured.
@@ -177,7 +203,11 @@ impl Recording {
             return Ok(Vec::new());
         };
         match handle.join() {
-            Ok(Ok(bytes)) => Ok(bytes),
+            Ok(Ok(())) => Ok(self
+                .audio
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()),
             Ok(Err(error)) => Err(CoreError::Voice(format!(
                 "cannot read audio from `{}`: {error}",
                 self.program
@@ -502,6 +532,33 @@ mod tests {
         assert_eq!(audio.samples(), [1, 2, 3]);
         assert_eq!(audio.rate(), WHISPER_RATE);
         let _ = std::fs::remove_file(raw);
+    }
+
+    #[test]
+    fn a_streaming_session_can_look_at_the_audio_before_it_ends() {
+        // The producer trickles samples out, so a drain in the middle sees the
+        // first half and the second drain sees only what came after it.
+        let config = command_capture(&[
+            "sh",
+            "-c",
+            "printf '\\001\\000\\002\\000'; sleep 0.3; printf '\\003\\000'; sleep 0.3",
+        ]);
+        let mut recording = Recording::start(&config).unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        let first = recording.drain();
+        assert_eq!(first.samples(), [1, 2], "the first drain takes what exists");
+
+        std::thread::sleep(Duration::from_millis(300));
+        let second = recording.drain();
+        assert_eq!(
+            second.samples(),
+            [3],
+            "the second drain takes only the rest"
+        );
+
+        assert!(recording.drain().is_empty(), "nothing is taken twice");
+        let whole = recording.stop().unwrap();
+        assert_eq!(whole.samples(), [1, 2, 3], "the whole recording survives");
     }
 
     #[test]

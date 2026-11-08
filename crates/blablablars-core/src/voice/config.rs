@@ -244,6 +244,39 @@ pub struct FeedbackConfig {
     pub command: Vec<String>,
 }
 
+/// Typing while the user is still speaking.
+///
+/// Off by default: the whole utterance at once is the better default for short
+/// notes, and streaming costs a transcription pass every `step_ms`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StreamConfig {
+    /// Type the words as they are spoken instead of at the end.
+    pub enabled: bool,
+    /// How long one step may wait for new audio before transcribing it.
+    pub step_ms: u64,
+    /// How much trailing audio a step shows a batch backend. Longer is more
+    /// accurate, shorter is more responsive; it does not affect latency growth.
+    pub window_ms: u64,
+    /// A program that streams partial results itself. Empty means "re-run the
+    /// configured batch backend over a window", which needs no extra program.
+    pub command: Vec<String>,
+    /// How long to wait for one hypothesis from `command` before giving up.
+    pub command_timeout_seconds: u64,
+}
+
+impl Default for StreamConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            step_ms: 4000,
+            window_ms: 20_000,
+            command: Vec::new(),
+            command_timeout_seconds: 30,
+        }
+    }
+}
+
 /// `true`/`false` or a table of rules.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -281,6 +314,7 @@ pub struct VoiceConfig {
     pub cleanup: CleanupSetting,
     pub output: OutputConfig,
     pub feedback: FeedbackConfig,
+    pub stream: StreamConfig,
 }
 
 impl Default for VoiceConfig {
@@ -293,6 +327,7 @@ impl Default for VoiceConfig {
             cleanup: CleanupSetting::default(),
             output: OutputConfig::default(),
             feedback: FeedbackConfig::default(),
+            stream: StreamConfig::default(),
         }
     }
 }
@@ -373,6 +408,22 @@ impl VoiceConfig {
                 "`output.kind: command` needs `output.argv`".to_string(),
             ));
         }
+        if self.stream.enabled && self.stream.step_ms == 0 {
+            return Err(CoreError::Voice(
+                "`stream.step_ms` must be greater than zero".to_string(),
+            ));
+        }
+        if self.stream.window_ms < self.stream.step_ms {
+            return Err(CoreError::Voice(format!(
+                "`stream.window_ms` ({}) is shorter than `stream.step_ms` ({}); the window                  must cover at least one step",
+                self.stream.window_ms, self.stream.step_ms
+            )));
+        }
+        if self.stream.command_timeout_seconds == 0 {
+            return Err(CoreError::Voice(
+                "`stream.command_timeout_seconds` must be greater than zero".to_string(),
+            ));
+        }
         Ok(())
     }
 }
@@ -410,6 +461,58 @@ mod tests {
         assert_eq!(config.output.kind, OutputKind::Auto);
         assert_eq!(config.capture.kind, CaptureKind::Auto);
         assert_eq!(config.cleanup.options(), CleanupOptions::default());
+    }
+
+    #[test]
+    fn streaming_is_off_until_it_is_asked_for() {
+        let config = VoiceConfig::default();
+        assert!(!config.stream.enabled);
+        assert_eq!(config.stream.step_ms, 4000);
+        assert_eq!(config.stream.window_ms, 20_000);
+        assert!(config.stream.command.is_empty(), "window mode by default");
+    }
+
+    #[test]
+    fn a_window_shorter_than_a_step_is_refused() {
+        let error = VoiceConfig::from_yaml(
+            r#"
+            stream:
+              enabled: true
+              step_ms: 5000
+              window_ms: 2000
+            "#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("shorter than"), "{error}");
+        assert!(error.contains("5000"), "{error}");
+    }
+
+    #[test]
+    fn a_zero_step_is_refused_only_when_streaming() {
+        assert!(VoiceConfig::from_yaml("stream:\n  step_ms: 0").is_ok());
+        let error =
+            VoiceConfig::from_yaml("stream:\n  enabled: true\n  step_ms: 0\n  window_ms: 0")
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("step_ms"), "{error}");
+    }
+
+    #[test]
+    fn a_stream_command_may_name_a_program() {
+        let config = VoiceConfig::from_yaml(
+            r#"
+            stream:
+              enabled: true
+              step_ms: 1000
+              window_ms: 4000
+              command: ["sherpa-online", "{model}", "{language}"]
+              command_timeout_seconds: 5
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.stream.command[0], "sherpa-online");
+        assert_eq!(config.stream.command_timeout_seconds, 5);
     }
 
     #[test]

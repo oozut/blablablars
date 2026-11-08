@@ -12,6 +12,7 @@ blablablars plugin add|list|remove|path               # the plugin list
 blablablars dictate [--toggle|--seconds N|--input F]  # record, transcribe, type
 blablablars config init|show|path                     # the dictation config
 blablablars models [--json]                           # models that were found
+blablablars engines [--json]                          # backends, installed or not
 blablablars version [--json]
 ```
 
@@ -133,10 +134,13 @@ config settings, and the whole feature is documented in
 | `--config FILE` | the dictation config to read |
 | `--model NAME` | override `models.default` for this run |
 | `--language LANG` | override `language` (`auto` detects it) |
-| `--output KIND` | `auto`, `stdout`, `command`, `xdotool`, `wtype` |
+| `--output KIND` | `auto`, `paste`, `stdout`, `command`, `xdotool`, `wtype` |
 | `--print` | print instead of typing (same as `--output stdout`) |
 | `--no-cleanup` | type the transcript exactly as the model produced it |
-| `--json` | report the run instead of typing it |
+| `--stream` | type the words as they settle instead of at the end |
+| `--stream-step MS` | how often a streaming session transcribes |
+| `--stream-window MS` | how much trailing audio a step shows the model |
+| `--json` | report the run instead of typing it (always batch) |
 
 `dictate` accepts the plugin flags above, so extensions can rewrite the
 transcript through the `transcription.raw` and `transcription.text` hooks.
@@ -144,7 +148,11 @@ transcript through the `transcription.raw` and `transcription.text` hooks.
 `config init [--path FILE] [--force]` writes a config with every default in it,
 `config show` prints the config in effect, and `config path` prints the file that
 would be read. `models` lists what is in `models.directory`; `--json` gives
-`{"directory", "default", "models": [{"name","file","bytes","size","default"}]}`.
+`{"directory", "default", "models": [{"name","file","bytes","size","layout","default"}]}`.
+`engines` reports the transcription backends — whether each program is installed,
+which one the config selects, and how many of the downloaded models it can read;
+`--json` gives `{"config", "default_model", "models_directory", "engines":
+[{"kind","label","program","installed","configured","runnable_models"}]}`.
 
 ## Adding a transport (for maintainers)
 
@@ -163,7 +171,9 @@ point: `--plugin`, `BLABLABLARS_PLUGINS` and the plugin list keep their meaning.
 
 ## Stability
 
-The spec grammar, the flag names in the table above, the environment variable
-names, the plugin-list format and the JSON shapes of `plugins --json` and
-`plugin list --json` are the long-term interface. New transports arrive as new
-kinds; existing specs keep loading.
+The spec grammar, the flag names in the tables above, the environment variable
+names, the plugin-list format, the config keys named in
+[`dictation.md`](dictation.md) and the JSON shapes of `plugins --json`,
+`plugin list --json`, `models --json` and `engines --json` are the long-term
+interface. New transports arrive as new kinds; new backends arrive as new
+`transcriber.kind` values; existing specs and configs keep loading.
