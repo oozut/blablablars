@@ -44,7 +44,8 @@ python-venv: ## Create the local virtualenv
 	$(PIP) install --quiet --upgrade maturin
 
 python-develop: python-venv ## Build and install the extension into $(VENV)
-	VIRTUAL_ENV=$(abspath $(VENV)) $(MATURIN) develop --release --manifest-path python/pyproject.toml
+	# `python/pyproject.toml` already points maturin at the crate in `[tool.maturin]`.
+	cd python && VIRTUAL_ENV=$(abspath $(VENV)) $(abspath $(MATURIN)) develop --release
 
 python-test: python-develop example ## Run the Python test suite
 	cd python && ../$(PY) -m unittest discover -s tests -v
