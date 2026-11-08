@@ -11,10 +11,13 @@
 //! * `dictate --seconds N` — record a fixed amount, for a script or a test.
 //! * `dictate --input FILE.wav` — skip the microphone entirely.
 //!
-//! The session is a Unix socket in the runtime directory, so the second press
-//! is one small write and never a signal or a pid file to leak.
+//! The session is a loopback socket noted down in the runtime directory, so the
+//! second press is one small write and never a signal or a pid to hunt for. It
+//! is also the same code on Linux, macOS and Windows, which is the point: a
+//! shortcut that works on two of the three is not a shortcut.
 
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -26,7 +29,7 @@ use clap::{Args, Subcommand};
 use crate::plugins::{self, AttachOptions};
 
 /// How long the first press waits for the session to be ready.
-const SOCKET_WAIT: Duration = Duration::from_secs(3);
+const SESSION_WAIT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Args)]
 pub struct DictateArgs {
@@ -278,15 +281,33 @@ fn report(
 }
 
 /// The first press starts a recorder; the second stops it.
-#[cfg(unix)]
+///
+/// The handshake is a loopback socket plus a small file that says which port to
+/// knock on. A Unix domain socket would do on Linux and macOS, but not on
+/// Windows, and a shortcut that works on two of the three platforms is not a
+/// shortcut. Port 0 is chosen by the kernel every time, so there is nothing to
+/// configure and nothing to collide with.
 fn toggle(args: &DictateArgs) -> Result<(), CoreError> {
-    let socket = socket_path()?;
+    let path = session_file()?;
 
-    if request_stop(&socket)? {
-        eprintln!("stopping — transcribing");
-        return Ok(());
+    if let Some(session) = read_session(&path) {
+        if request(&session, Request::Stop).is_some() {
+            eprintln!("stopping — transcribing");
+            return Ok(());
+        }
+        // The note is there but nobody answered: the previous session died
+        // without cleaning up. Its wording says so, so replace it.
+        let _ = std::fs::remove_file(&path);
     }
 
+    spawn_recorder(args)?;
+    wait_for_session(&path)?;
+    eprintln!("recording — press the shortcut again to stop");
+    Ok(())
+}
+
+/// Start the detached recorder with the flags this run was given.
+fn spawn_recorder(args: &DictateArgs) -> Result<(), CoreError> {
     let exe = std::env::current_exe().map_err(|error| {
         CoreError::Voice(format!(
             "cannot find our own binary to start a recorder: {error}"
@@ -332,48 +353,74 @@ fn toggle(args: &DictateArgs) -> Result<(), CoreError> {
     command
         .spawn()
         .map_err(|error| CoreError::Voice(format!("cannot start a recorder: {error}")))?;
-
-    wait_for_socket(&socket)?;
-    eprintln!("recording — press the shortcut again to stop");
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn toggle(_args: &DictateArgs) -> Result<(), CoreError> {
-    Err(CoreError::Voice(
-        "`--toggle` needs Unix domain sockets, which this build does not have. \
-         Use `--seconds N`, or bind two shortcuts: `dictate` and a stop signal."
-            .to_string(),
-    ))
+/// What the second press asks the recorder to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Request {
+    /// End the session and transcribe.
+    Stop,
+    /// Just check that somebody is listening.
+    Ping,
 }
 
-/// The detached recorder: bind the socket, capture, and transcribe on stop.
-#[cfg(unix)]
+impl Request {
+    fn word(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::Ping => "ping",
+        }
+    }
+}
+
+/// What the recorder writes down so the next press can find it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Session {
+    port: u16,
+    /// So another local process cannot end a recording it did not start.
+    token: String,
+}
+
+/// The detached recorder: listen, capture, and transcribe on stop.
 fn record_session(args: &DictateArgs, dictation: Dictation) -> Result<(), CoreError> {
-    let socket = socket_path()?;
-    let listener = bind_listener(&socket)?;
-    let _guard = SocketGuard(socket.clone());
+    let path = session_file()?;
+
+    // Two recorders on one machine would fight over the microphone, and the
+    // second press would not know which one it was talking to.
+    if let Some(other) = read_session(&path) {
+        if request(&other, Request::Ping).is_some() {
+            return Err(CoreError::Voice(
+                "a recording session is already running".to_string(),
+            ));
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .map_err(|error| CoreError::Voice(format!("cannot open the session socket: {error}")))?;
+    let port = listener
+        .local_addr()
+        .map_err(|error| CoreError::Voice(format!("cannot open the session socket: {error}")))?
+        .port();
 
     let recording = Recording::start(&dictation.config().capture)?;
+    let session = Session {
+        port,
+        token: make_token(),
+    };
+    write_session(&path, &session)?;
+    let _guard = SessionGuard(path);
     dictation.notify("recording");
+
     listener
         .set_nonblocking(true)
         .map_err(|error| CoreError::Voice(format!("cannot watch the session socket: {error}")))?;
 
     let started = Instant::now();
     loop {
-        match listener.accept() {
-            Ok((mut stream, _)) => {
-                if is_stop_request(&mut stream) {
-                    break;
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(error) => {
-                return Err(CoreError::Voice(format!(
-                    "cannot watch the session socket: {error}"
-                )))
-            }
+        if serve_once(&listener, &session)? {
+            break;
         }
         if recording.at_limit() {
             eprintln!(
@@ -396,137 +443,118 @@ fn record_session(args: &DictateArgs, dictation: Dictation) -> Result<(), CoreEr
     }
 }
 
-#[cfg(not(unix))]
-fn record_session(_args: &DictateArgs, _dictation: Dictation) -> Result<(), CoreError> {
-    Err(CoreError::Voice(
-        "the background recorder needs Unix domain sockets".to_string(),
-    ))
+/// Answer every connection that arrived since the last look. `true` when the
+/// session should stop.
+fn serve_once(listener: &TcpListener, session: &Session) -> Result<bool, CoreError> {
+    loop {
+        let (mut stream, _) = match listener.accept() {
+            Ok(accepted) => accepted,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+            Err(error) => {
+                return Err(CoreError::Voice(format!(
+                    "cannot watch the session socket: {error}"
+                )))
+            }
+        };
+        let _ = stream.set_nonblocking(false);
+        // A client that connects and says nothing must not wedge the session.
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+
+        let mut buffer = [0u8; 128];
+        let read = stream.read(&mut buffer).unwrap_or(0);
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        let (word, token) = request
+            .trim()
+            .split_once(' ')
+            .map(|(word, token)| (word.trim(), token.trim()))
+            .unwrap_or((request.trim(), ""));
+
+        if token != session.token {
+            let _ = stream.write_all(b"forbidden\n");
+            continue;
+        }
+        if word == Request::Stop.word() {
+            let _ = stream.write_all(b"stopping\n");
+            return Ok(true);
+        }
+        let _ = stream.write_all(b"running\n");
+    }
 }
 
-/// Removes the socket file when the session ends, however it ends.
-#[cfg(unix)]
-struct SocketGuard(PathBuf);
+/// Removes the session note when the session ends, however it ends.
+struct SessionGuard(PathBuf);
 
-#[cfg(unix)]
-impl Drop for SocketGuard {
+impl Drop for SessionGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
 }
 
-/// `$XDG_RUNTIME_DIR/blablablars/dictate.sock`, or the temp directory.
-#[cfg(unix)]
-pub fn socket_path() -> Result<PathBuf, CoreError> {
-    let base = match std::env::var_os("XDG_RUNTIME_DIR") {
-        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
-        _ => std::env::temp_dir(),
-    };
-    let directory = base.join("blablablars");
+/// Where the session note lives: `$XDG_RUNTIME_DIR/blablablars/` on Linux, the
+/// per-user temporary directory on macOS and Windows.
+pub fn session_file() -> Result<PathBuf, CoreError> {
+    let directory = voice::platform::runtime_dir().ok_or_else(|| {
+        CoreError::Voice("no runtime directory: set $XDG_RUNTIME_DIR or $TMPDIR".to_string())
+    })?;
     std::fs::create_dir_all(&directory)?;
-    Ok(directory.join(format!("dictate-{}.sock", user_id())))
+    Ok(directory.join(format!("dictate-{}.json", voice::platform::user_tag())))
 }
 
-/// A stable per-user id, so two users on one machine do not share a socket.
-#[cfg(unix)]
-fn user_id() -> u32 {
-    #[allow(unsafe_code)]
-    // SAFETY: `geteuid` takes no arguments, cannot fail, and is always safe to
-    // call; it is only `unsafe` because it is an FFI call.
-    unsafe {
-        libc::geteuid()
-    }
+fn write_session(path: &Path, session: &Session) -> Result<(), CoreError> {
+    // Written beside and renamed, so a second press never reads half a note.
+    let temporary = path.with_extension("json.tmp");
+    let note = serde_json::json!({ "port": session.port, "token": session.token });
+    std::fs::write(&temporary, serde_json::to_vec(&note)?)?;
+    std::fs::rename(&temporary, path)?;
+    Ok(())
 }
 
-/// Reads one request from a client and answers: `stop` ends the session, and
-/// anything else (`ping`, from a second press that found a stale socket file)
-/// just asks whether it is alive.
-#[cfg(unix)]
-fn is_stop_request(stream: &mut std::os::unix::net::UnixStream) -> bool {
-    use std::io::Read as _;
-
-    // The listener is non-blocking; the accepted stream is not, but a client
-    // that never closes must not wedge the session.
-    let _ = stream.set_nonblocking(false);
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
-
-    let mut request = String::new();
-    let _ = stream.take(64).read_to_string(&mut request);
-
-    if request.trim() == "stop" {
-        return true;
-    }
-    let _ = stream.write_all(b"running\n");
-    false
-}
-
-#[cfg(unix)]
-fn bind_listener(socket: &Path) -> Result<std::os::unix::net::UnixListener, CoreError> {
-    use std::os::unix::net::UnixListener;
-
-    if let Ok(listener) = UnixListener::bind(socket) {
-        return Ok(listener);
-    }
-    // A previous session may have left the file behind after a crash. Only
-    // remove it when nothing answers on it — and ask with `ping`, so a live
-    // session is not stopped by the question.
-    if session_alive(socket) {
-        return Err(CoreError::Voice(
-            "a recording session is already running".to_string(),
-        ));
-    }
-    let _ = std::fs::remove_file(socket);
-    UnixListener::bind(socket).map_err(|error| {
-        CoreError::Voice(format!(
-            "cannot create the session socket `{}`: {error}",
-            socket.display()
-        ))
+fn read_session(path: &Path) -> Option<Session> {
+    let bytes = std::fs::read(path).ok()?;
+    let note: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    Some(Session {
+        port: u16::try_from(note.get("port")?.as_u64()?).ok()?,
+        token: note.get("token")?.as_str()?.to_string(),
     })
 }
 
-/// Send one request and wait for the answer. `None` when nothing is listening.
-#[cfg(unix)]
-fn roundtrip(socket: &Path, request: &str) -> Result<Option<String>, CoreError> {
-    use std::io::Read as _;
-    use std::os::unix::net::UnixStream;
-
-    let mut stream = match UnixStream::connect(socket) {
-        Ok(stream) => stream,
-        Err(_) => return Ok(None),
-    };
-    stream.write_all(request.as_bytes())?;
-    stream.shutdown(std::net::Shutdown::Write)?;
-    // The answer is short; a session that is busy transcribing may take a
-    // moment to close the connection.
+/// One request to a session. `None` when nothing is listening.
+fn request(session: &Session, request: Request) -> Option<String> {
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, session.port));
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(500)).ok()?;
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    let mut reply = String::new();
-    let _ = stream.take(64).read_to_string(&mut reply);
-    Ok(Some(reply))
+    stream
+        .write_all(format!("{} {}\n", request.word(), session.token).as_bytes())
+        .ok()?;
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let mut buffer = [0u8; 64];
+    let read = stream.read(&mut buffer).unwrap_or(0);
+    Some(String::from_utf8_lossy(&buffer[..read]).to_string())
 }
 
-/// Ask a running session to stop. `Ok(false)` when none is running.
-#[cfg(unix)]
-fn request_stop(socket: &Path) -> Result<bool, CoreError> {
-    Ok(roundtrip(socket, "stop")?.is_some())
+/// A per-session secret, so another local process cannot stop the recording.
+fn make_token() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    format!("{:x}{:x}", std::process::id(), nanos)
 }
 
-/// Whether a session is listening, without asking it to stop.
-#[cfg(unix)]
-fn session_alive(socket: &Path) -> bool {
-    matches!(roundtrip(socket, "ping"), Ok(Some(reply)) if reply.trim() == "running")
-}
-
-#[cfg(unix)]
-fn wait_for_socket(socket: &Path) -> Result<(), CoreError> {
-    let deadline = Instant::now() + SOCKET_WAIT;
+fn wait_for_session(path: &Path) -> Result<(), CoreError> {
+    let deadline = Instant::now() + SESSION_WAIT;
     while Instant::now() < deadline {
-        if socket.exists() {
-            return Ok(());
+        if let Some(session) = read_session(path) {
+            if request(&session, Request::Ping).is_some() {
+                return Ok(());
+            }
         }
         std::thread::sleep(Duration::from_millis(20));
     }
     Err(CoreError::Voice(format!(
         "the recorder did not start within {}s; see {}",
-        SOCKET_WAIT.as_secs(),
+        SESSION_WAIT.as_secs(),
         log_file()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "the recorder's log".to_string())
@@ -535,12 +563,7 @@ fn wait_for_socket(socket: &Path) -> Result<(), CoreError> {
 
 /// Where the detached recorder writes its diagnostics.
 fn log_file() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
-        })?;
-    let directory = base.join("blablablars");
+    let directory = voice::platform::state_dir()?;
     std::fs::create_dir_all(&directory).ok()?;
     Some(directory.join("dictate.log"))
 }
@@ -552,9 +575,10 @@ fn parse_output_kind(raw: &str) -> Result<OutputKind, CoreError> {
         "command" => OutputKind::Command,
         "xdotool" => OutputKind::Xdotool,
         "wtype" => OutputKind::Wtype,
+        "paste" | "clipboard" => OutputKind::Paste,
         other => {
             return Err(CoreError::Voice(format!(
-                "unknown output `{other}`: use auto, stdout, command, xdotool or wtype"
+                "unknown output `{other}`: use auto, stdout, command, xdotool, wtype or paste"
             )))
         }
     })
@@ -630,6 +654,116 @@ pub fn default_config_document() -> String {
     )
 }
 
+/// `blablablars engines`
+///
+/// The question this answers is the one that comes right after installing
+/// blablablars: which of these backends can I run here, and what do I still have
+/// to download? So it reports the program, whether it is on `PATH`, and how many
+/// of the installed models that backend can read.
+pub fn list_engines(config_path: Option<&Path>, json: bool) -> Result<(), CoreError> {
+    use blablablars_core::voice::config::TranscriberKind;
+
+    let (config, _) = VoiceConfig::load_resolved(config_path)?;
+    let models = voice::models::discover(&config.models.directory)?;
+
+    let rows: Vec<_> = TranscriberKind::ALL
+        .iter()
+        .map(|kind| {
+            let configured = *kind == config.transcriber.kind;
+            let program = if configured {
+                config.transcriber.program()
+            } else {
+                kind.default_binary().to_string()
+            };
+            let installed =
+                !program.is_empty() && voice::platform::find_program(&program).is_some();
+            let runnable = models
+                .iter()
+                .filter(|model| kind.reads(model.layout()))
+                .count();
+            (*kind, configured, program, installed, runnable)
+        })
+        .collect();
+
+    if json {
+        let engines: Vec<_> = rows
+            .iter()
+            .map(|(kind, configured, program, installed, runnable)| {
+                serde_json::json!({
+                    "kind": kind,
+                    "label": kind.label(),
+                    "program": program,
+                    "installed": installed,
+                    "configured": configured,
+                    "runnable_models": runnable,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "config": config_path.map(|path| path.display().to_string()),
+                "models_directory": config.models.directory,
+                "default_model": config.models.default,
+                "engines": engines,
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!("models in {}", config.models.directory.display());
+    if models.is_empty() {
+        println!(
+            "  (none yet)\n{}",
+            voice::models::download_hint(&config.models.default, &config.models.directory)
+        );
+    } else {
+        for model in &models {
+            let default = voice::models::resolve(&config.models.directory, &config.models.default)
+                .is_ok_and(|resolved| resolved.path == model.path);
+            println!(
+                "{} {:<38} {:>9}  {}",
+                if default { "*" } else { " " },
+                model.name,
+                model.size_human(),
+                model.layout().describe()
+            );
+        }
+    }
+
+    println!();
+    println!("backends");
+    for (kind, configured, program, installed, runnable) in rows {
+        let marker = if configured { "*" } else { " " };
+        let state = if installed {
+            "installed".to_string()
+        } else if kind == TranscriberKind::Command {
+            "set transcriber.argv".to_string()
+        } else {
+            "not installed".to_string()
+        };
+        let models = if runnable == 1 {
+            "1 model".to_string()
+        } else {
+            format!("{runnable} models")
+        };
+        println!(
+            "{marker} {:<12} {:<22} {state:<15}  {models}",
+            kind_name(kind),
+            program
+        );
+        println!("      {}", kind.label());
+    }
+    Ok(())
+}
+
+fn kind_name(kind: blablablars_core::voice::config::TranscriberKind) -> String {
+    serde_json::to_value(kind)
+        .ok()
+        .and_then(|value| value.as_str().map(|name| name.to_string()))
+        .unwrap_or_else(|| format!("{kind:?}"))
+}
+
 /// `blablablars models`
 pub fn list_models(config_path: Option<&Path>, json: bool) -> Result<(), CoreError> {
     let (config, _) = VoiceConfig::load_resolved(config_path)?;
@@ -646,6 +780,7 @@ pub fn list_models(config_path: Option<&Path>, json: bool) -> Result<(), CoreErr
                     "file": model.path,
                     "bytes": model.bytes,
                     "size": model.size_human(),
+                    "layout": model.layout().describe(),
                     "default": resolved.as_ref().is_some_and(|found| found.path == model.path),
                 })
             })
@@ -680,9 +815,10 @@ pub fn list_models(config_path: Option<&Path>, json: bool) -> Result<(), CoreErr
             " "
         };
         println!(
-            "{marker} {:<32} {:>9}  {}",
+            "{marker} {:<32} {:>9}  {:<24}  {}",
             model.name,
             model.size_human(),
+            model.layout().describe(),
             model.file_name
         );
     }

@@ -1,10 +1,11 @@
 //! Turning audio into text.
 //!
-//! Two backends ship today, and they cover the two ways this problem is
-//! actually solved: a local `whisper-cli` from whisper.cpp (GPU when that build
-//! has one), and any other program through a command template, which is how a
-//! different model family, a remote endpoint, or a streaming engine gets wired
-//! in without touching this crate.
+//! Four backends ship today, and between them they cover the runtimes people
+//! actually use: `whisper-cli` and `parakeet-cli` from the ggml toolchain (one
+//! library, CPU or GPU, no runtime to install), `sherpa-onnx` for the ONNX
+//! Runtime world (Whisper ONNX, NVIDIA Parakeet ONNX, transducers), and a
+//! command template for everything else — `faster-whisper`, a Python
+//! `onnxruntime` script, a remote endpoint, a streaming engine.
 //!
 //! The contract is deliberately narrow: 16 kHz mono PCM in, text out. Anything
 //! smarter — partial results, language detection reporting, word timings —
@@ -19,7 +20,7 @@ use crate::error::CoreError;
 
 use super::audio::{self, Audio};
 use super::config::{GpuMode, TranscriberConfig, TranscriberKind};
-use super::models::Model;
+use super::models::{Layout, Model, OnnxFiles};
 
 /// Anything that can turn audio into a transcript.
 pub trait Transcriber: Send + Sync {
@@ -35,24 +36,43 @@ pub fn from_config(
     config: &TranscriberConfig,
     language: &str,
     model: &Model,
-) -> Box<dyn Transcriber> {
-    match config.kind {
+) -> Result<Box<dyn Transcriber>, CoreError> {
+    let binary = config.program();
+    let timeout = Duration::from_secs(config.timeout_seconds);
+
+    Ok(match config.kind {
         TranscriberKind::WhisperCli => Box::new(WhisperCli {
-            binary: config.binary.clone(),
+            binary,
             model: model.clone(),
             language: language.to_string(),
             extra_args: config.extra_args.clone(),
             gpu: config.gpu,
             threads: config.threads,
-            timeout: Duration::from_secs(config.timeout_seconds),
+            timeout,
         }),
+        TranscriberKind::Parakeet => Box::new(Parakeet {
+            binary,
+            model: model.clone(),
+            extra_args: config.extra_args.clone(),
+            gpu: config.gpu,
+            threads: config.threads,
+            timeout,
+        }),
+        TranscriberKind::SherpaOnnx => Box::new(SherpaOnnx::new(
+            binary,
+            model,
+            language,
+            config.extra_args.clone(),
+            config.threads,
+            timeout,
+        )?),
         TranscriberKind::Command => Box::new(CommandTranscriber {
             argv: config.argv.clone(),
             model: model.clone(),
             language: language.to_string(),
-            timeout: Duration::from_secs(config.timeout_seconds),
+            timeout,
         }),
-    }
+    })
 }
 
 /// The `whisper-cli` program from whisper.cpp.
@@ -96,6 +116,165 @@ impl WhisperCli {
 impl Transcriber for WhisperCli {
     fn describe(&self) -> String {
         format!("whisper-cli ({})", self.model.file_name)
+    }
+
+    fn transcribe(&self, audio: &Audio) -> Result<String, CoreError> {
+        let wav = TempWav::write(audio)?;
+        let mut command = Command::new(&self.binary);
+        command.args(self.argv(wav.path()));
+
+        let output = run_with_timeout(command, self.timeout, &self.binary)?;
+        Ok(transcript_from_stdout(&output.stdout))
+    }
+}
+
+/// NVIDIA Parakeet TDT through the same ggml toolchain as whisper.cpp.
+///
+/// It is a different model family with the same shape of interface, and on a
+/// CPU it is usually several times faster than Whisper at the same quality. The
+/// models are multilingual and detect the language themselves, so `language` is
+/// not passed: there is no flag for it.
+#[derive(Debug)]
+pub struct Parakeet {
+    pub binary: String,
+    pub model: Model,
+    pub extra_args: Vec<String>,
+    pub gpu: GpuMode,
+    pub threads: Option<u32>,
+    pub timeout: Duration,
+}
+
+impl Parakeet {
+    /// The exact command line, so the flag handling can be pinned by a test.
+    pub fn argv(&self, wav: &Path) -> Vec<String> {
+        let mut argv = vec![
+            "-m".to_string(),
+            self.model.path.display().to_string(),
+            "-f".to_string(),
+            wav.display().to_string(),
+            // `parakeet-cli` prints timings and token counts on stdout by
+            // default; without this flag they would be typed as dictation.
+            "-np".to_string(),
+        ];
+        if self.gpu == GpuMode::Off {
+            argv.push("-ng".to_string());
+        }
+        if let Some(threads) = self.threads {
+            argv.push("-t".to_string());
+            argv.push(threads.to_string());
+        }
+        argv.extend(self.extra_args.iter().cloned());
+        argv
+    }
+}
+
+impl Transcriber for Parakeet {
+    fn describe(&self) -> String {
+        format!("parakeet-cli ({})", self.model.file_name)
+    }
+
+    fn transcribe(&self, audio: &Audio) -> Result<String, CoreError> {
+        let wav = TempWav::write(audio)?;
+        let mut command = Command::new(&self.binary);
+        command.args(self.argv(wav.path()));
+
+        let output = run_with_timeout(command, self.timeout, &self.binary)?;
+        Ok(transcript_from_stdout(&output.stdout))
+    }
+}
+
+/// ONNX Runtime models through `sherpa-onnx`.
+///
+/// An ONNX model is a folder, not a file, and sherpa-onnx wants each part named
+/// on the command line: `tokens.txt` plus an encoder and a decoder for Whisper,
+/// and an encoder, a decoder and a joiner for a transducer (NVIDIA Parakeet,
+/// Zipformer, Conformer). The folder is inspected once, when the backend is
+/// built, so a model the toolchain does not recognise fails before recording
+/// starts rather than after.
+#[derive(Debug)]
+pub struct SherpaOnnx {
+    pub binary: String,
+    pub model: Model,
+    pub files: OnnxFiles,
+    pub layout: Layout,
+    pub language: String,
+    pub extra_args: Vec<String>,
+    pub threads: Option<u32>,
+    pub timeout: Duration,
+}
+
+impl SherpaOnnx {
+    fn new(
+        binary: String,
+        model: &Model,
+        language: &str,
+        extra_args: Vec<String>,
+        threads: Option<u32>,
+        timeout: Duration,
+    ) -> Result<Self, CoreError> {
+        let layout = model.layout();
+        let Some(files) = model.onnx_files() else {
+            return Err(CoreError::Voice(format!(
+                "`{}` is not an ONNX model folder: it needs `tokens.txt` and an \
+                 `*encoder*.onnx`, which sherpa-onnx reads. Pass `--model DIR`, or \
+                 use a ggml `*.bin` model with `transcriber.kind: whisper-cli` or \
+                 `parakeet`.",
+                model.path.display()
+            )));
+        };
+        Ok(Self {
+            binary,
+            model: model.clone(),
+            files,
+            layout,
+            language: language.to_string(),
+            extra_args,
+            threads,
+            timeout,
+        })
+    }
+
+    /// The exact command line, pinned by tests because the flag names come from
+    /// sherpa-onnx and are not guessable.
+    pub fn argv(&self, wav: &Path) -> Vec<String> {
+        let flag = |name: &str, path: &Path| format!("--{name}={}", path.display());
+        let mut argv = vec![flag("tokens", &self.files.tokens)];
+
+        match self.layout {
+            Layout::TransducerOnnx => {
+                argv.push(flag("encoder", &self.files.encoder));
+                if let Some(decoder) = &self.files.decoder {
+                    argv.push(flag("decoder", decoder));
+                }
+                if let Some(joiner) = &self.files.joiner {
+                    argv.push(flag("joiner", joiner));
+                }
+            }
+            _ => {
+                argv.push(flag("whisper-encoder", &self.files.encoder));
+                if let Some(decoder) = &self.files.decoder {
+                    argv.push(flag("whisper-decoder", decoder));
+                }
+                argv.push("--whisper-task=transcribe".to_string());
+                if !self.language.eq_ignore_ascii_case("auto") {
+                    argv.push(format!("--whisper-language={}", self.language));
+                }
+            }
+        }
+
+        if let Some(threads) = self.threads {
+            argv.push(format!("--num-threads={threads}"));
+        }
+        argv.extend(self.extra_args.iter().cloned());
+        // The audio file is positional and comes last.
+        argv.push(wav.display().to_string());
+        argv
+    }
+}
+
+impl Transcriber for SherpaOnnx {
+    fn describe(&self) -> String {
+        format!("sherpa-onnx ({})", self.model.file_name)
     }
 
     fn transcribe(&self, audio: &Audio) -> Result<String, CoreError> {
@@ -472,5 +651,165 @@ mod tests {
     fn an_empty_argv_is_rejected() {
         let transcriber = command(&[], Duration::from_secs(1));
         assert!(transcriber.transcribe(&audio()).is_err());
+    }
+    fn scratch_model(tag: &str, files: &[(&str, &str)]) -> PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("blb-transcribe-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        for (name, body) in files {
+            std::fs::write(directory.join(name), body).unwrap();
+        }
+        directory
+    }
+
+    fn model_at(path: PathBuf) -> Model {
+        Model {
+            name: "x".into(),
+            file_name: path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            path,
+            bytes: 1,
+        }
+    }
+
+    #[test]
+    fn parakeet_is_not_asked_to_print_its_progress() {
+        // `parakeet-cli` writes timings and token counts on stdout by default.
+        // Anything it prints beyond the transcript is typed as dictation, so
+        // `-np` is not cosmetic.
+        let transcriber = Parakeet {
+            binary: "parakeet-cli".into(),
+            model: model_at(PathBuf::from("/models/ggml-parakeet-tdt-0.6b-v3-f16.bin")),
+            extra_args: vec!["--print-segments".into()],
+            gpu: GpuMode::Off,
+            threads: Some(6),
+            timeout: Duration::from_secs(10),
+        };
+        let argv = transcriber.argv(Path::new("/tmp/a.wav"));
+        assert_eq!(argv[0], "-m");
+        assert_eq!(argv[1], "/models/ggml-parakeet-tdt-0.6b-v3-f16.bin");
+        assert!(argv.contains(&"-np".to_string()));
+        assert!(argv.contains(&"-ng".to_string()));
+        assert!(argv.windows(2).any(|pair| pair == ["-t", "6"]));
+        // Extra arguments come last, so they can override a default.
+        assert_eq!(argv.last().unwrap(), "--print-segments");
+    }
+
+    #[test]
+    fn an_onnx_transducer_gets_encoder_decoder_joiner_and_tokens() {
+        let directory = scratch_model(
+            "transducer",
+            &[
+                ("tokens.txt", "a\n"),
+                ("encoder.int8.onnx", ""),
+                ("decoder.int8.onnx", ""),
+                ("joiner.int8.onnx", ""),
+            ],
+        );
+        let model = model_at(directory);
+        let transcriber = SherpaOnnx::new(
+            "sherpa-onnx-offline".into(),
+            &model,
+            "auto",
+            vec![],
+            Some(4),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+
+        let argv = transcriber.argv(Path::new("/tmp/a.wav"));
+        assert!(argv.iter().any(|arg| arg.starts_with("--tokens=")));
+        assert!(argv.iter().any(|arg| arg.starts_with("--encoder=")));
+        assert!(argv.iter().any(|arg| arg.starts_with("--decoder=")));
+        assert!(argv.iter().any(|arg| arg.starts_with("--joiner=")));
+        assert!(
+            !argv.iter().any(|arg| arg.starts_with("--whisper-encoder=")),
+            "a transducer is not a Whisper model"
+        );
+        assert!(argv.contains(&"--num-threads=4".to_string()));
+        assert_eq!(argv.last().unwrap(), "/tmp/a.wav");
+    }
+
+    #[test]
+    fn an_onnx_whisper_gets_its_language_and_no_joiner_flag() {
+        let directory = scratch_model(
+            "whisper-onnx",
+            &[
+                ("tiny.en-tokens.txt", "a\n"),
+                ("tiny.en-encoder.int8.onnx", ""),
+                ("tiny.en-decoder.int8.onnx", ""),
+            ],
+        );
+        let model = model_at(directory);
+
+        let german = SherpaOnnx::new(
+            "sherpa-onnx-offline".into(),
+            &model,
+            "de",
+            vec![],
+            None,
+            Duration::from_secs(10),
+        )
+        .unwrap()
+        .argv(Path::new("/tmp/a.wav"));
+        assert!(german
+            .iter()
+            .any(|arg| arg.starts_with("--whisper-encoder=")));
+        assert!(german.iter().any(|arg| arg == "--whisper-language=de"));
+        assert!(!german.iter().any(|arg| arg.starts_with("--tokens=tiny")));
+        assert!(!german.iter().any(|arg| arg.starts_with("--encoder=")));
+
+        // `auto` means "let the model decide", which is the absence of the flag.
+        let auto = SherpaOnnx::new(
+            "sherpa-onnx-offline".into(),
+            &model,
+            "auto",
+            vec![],
+            None,
+            Duration::from_secs(10),
+        )
+        .unwrap()
+        .argv(Path::new("/tmp/a.wav"));
+        assert!(!auto
+            .iter()
+            .any(|arg| arg.starts_with("--whisper-language=")));
+    }
+
+    #[test]
+    fn a_folder_that_is_not_an_onnx_model_is_rejected_before_recording() {
+        let directory = scratch_model("not-a-model", &[("readme.md", "hello")]);
+        let error = SherpaOnnx::new(
+            "sherpa-onnx-offline".into(),
+            &model_at(directory),
+            "en",
+            vec![],
+            None,
+            Duration::from_secs(10),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("not an ONNX model folder"), "{error}");
+        assert!(error.contains("whisper-cli"), "{error}");
+    }
+
+    #[test]
+    fn a_command_backend_can_ignore_the_model_entirely() {
+        // A streaming engine or a remote API has no local model file; the name
+        // is still passed through, as written.
+        let transcriber = command(
+            &["sh", "-c", "echo \"model is $1\"", "sh", "{model}"],
+            Duration::from_secs(5),
+        );
+        let _ = transcriber;
+        let rendered = substitute(
+            &["--model".to_string(), "{model_name}".to_string()],
+            Path::new("/tmp/a.wav"),
+            &Model::unresolved("Voxtral-Mini-3B"),
+            "en",
+        );
+        assert_eq!(rendered, ["--model", "Voxtral-Mini-3B"]);
     }
 }

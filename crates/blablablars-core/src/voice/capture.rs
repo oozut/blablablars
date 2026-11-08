@@ -206,6 +206,53 @@ impl Drop for Recording {
     }
 }
 
+/// A capture program and how to build its arguments.
+type Candidate = (&'static str, fn(Option<&str>) -> Vec<String>);
+
+/// The producers to try on this desktop, best first.
+///
+/// Linux gets the three sound-server tools it always has. macOS and Windows
+/// have no shipped command-line recorder, so they get `ffmpeg` (which every
+/// install of either tends to have) and `sox`, whose `-d` means "the default
+/// device" on all three systems. Any of them can be overridden with
+/// `capture.kind: command`.
+fn candidates() -> Vec<Candidate> {
+    let mut candidates: Vec<Candidate> = Vec::new();
+    if cfg!(target_os = "linux") || !cfg!(any(target_os = "macos", windows)) {
+        candidates.push(("parecord", parecord_args));
+        candidates.push(("pw-record", pw_record_args));
+        candidates.push(("arecord", arecord_args));
+    }
+    if cfg!(target_os = "macos") {
+        candidates.push(("ffmpeg", ffmpeg_avfoundation_args));
+    }
+    if cfg!(windows) {
+        candidates.push(("ffmpeg", ffmpeg_dshow_args));
+    }
+    // A universal last resort: `sox -d` opens the default input device of
+    // ALSA, CoreAudio or WAVE, whichever the host has.
+    candidates.push(("sox", sox_args));
+    candidates
+}
+
+/// How to install something that can record, in this platform's spelling.
+fn install_hint() -> String {
+    if cfg!(windows) {
+        "Install `ffmpeg` (or SoX) and put it on PATH, or set `capture.argv` in the config \
+         to any program that writes raw 16-bit mono 16 kHz PCM to stdout."
+            .to_string()
+    } else if cfg!(target_os = "macos") {
+        "Install `ffmpeg` (`brew install ffmpeg`) or SoX (`brew install sox`), or set \
+         `capture.argv` to any program that writes raw 16-bit mono 16 kHz PCM to stdout."
+            .to_string()
+    } else {
+        "Install PulseAudio's `parecord`, PipeWire's `pw-record` or ALSA's `arecord` \
+         (or `sox`), or set `capture.argv` in the config to any program that writes raw \
+         16-bit mono 16 kHz PCM to stdout."
+            .to_string()
+    }
+}
+
 /// The producer command for this config, with the arguments the backend wants.
 pub fn capture_command(config: &CaptureConfig) -> Result<(String, Vec<String>), CoreError> {
     if config.kind == CaptureKind::Command {
@@ -219,28 +266,19 @@ pub fn capture_command(config: &CaptureConfig) -> Result<(String, Vec<String>), 
         return Ok((program, argv));
     }
 
-    /// A capture program and how to build its arguments.
-    type Candidate = (&'static str, fn(Option<&str>) -> Vec<String>);
-
-    let candidates: [Candidate; 3] = [
-        ("parecord", parecord_args),
-        ("pw-record", pw_record_args),
-        ("arecord", arecord_args),
-    ];
-
-    let mut installed = Vec::new();
-    for (program, build) in candidates {
+    let candidates = candidates();
+    for (program, build) in &candidates {
         if find_in_path(program).is_some() {
-            return Ok((program.to_string(), build(config.device.as_deref())));
+            return Ok(((*program).to_string(), build(config.device.as_deref())));
         }
-        installed.push(program);
     }
 
+    let mut programs: Vec<&str> = candidates.iter().map(|(name, _)| *name).collect();
+    programs.dedup();
     Err(CoreError::Voice(format!(
-        "cannot record: none of {} is installed. Install PulseAudio's `parecord`, \
-         PipeWire's `pw-record` or ALSA's `arecord`, or set `capture.argv` in the config \
-         to any program that writes raw 16-bit mono {WHISPER_RATE} Hz PCM to stdout.",
-        installed.join(", ")
+        "cannot record: none of {} is installed. {}",
+        programs.join(", "),
+        install_hint()
     )))
 }
 
@@ -294,6 +332,74 @@ fn arecord_args(device: Option<&str>) -> Vec<String> {
         argv.push(device.to_string());
     }
     argv
+}
+
+/// ffmpeg on macOS: CoreAudio inputs are addressed as `:INDEX` (or
+/// `VIDEO:AUDIO`, which is passed through unchanged).
+fn ffmpeg_avfoundation_args(device: Option<&str>) -> Vec<String> {
+    let input = match device {
+        Some(device) if device.contains(':') => device.to_string(),
+        Some(device) => format!(":{device}"),
+        None => ":0".to_string(),
+    };
+    vec![
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-f".to_string(),
+        "avfoundation".to_string(),
+        "-i".to_string(),
+        input,
+        "-ac".to_string(),
+        "1".to_string(),
+        "-ar".to_string(),
+        WHISPER_RATE.to_string(),
+        "-f".to_string(),
+        "s16le".to_string(),
+        "-".to_string(),
+    ]
+}
+
+/// ffmpeg on Windows: DirectShow needs the device's own name, which only the
+/// user can provide (`ffmpeg -list_devices true -f dshow -i dummy`).
+fn ffmpeg_dshow_args(device: Option<&str>) -> Vec<String> {
+    let input = format!("audio={}", device.unwrap_or("default"));
+    vec![
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-f".to_string(),
+        "dshow".to_string(),
+        "-i".to_string(),
+        input,
+        "-ac".to_string(),
+        "1".to_string(),
+        "-ar".to_string(),
+        WHISPER_RATE.to_string(),
+        "-f".to_string(),
+        "s16le".to_string(),
+        "-".to_string(),
+    ]
+}
+
+/// SoX: `-d` is the platform's default input device, and `-t raw -` writes the
+/// samples to stdout.
+fn sox_args(_device: Option<&str>) -> Vec<String> {
+    vec![
+        "-q".to_string(),
+        "-d".to_string(),
+        "-r".to_string(),
+        WHISPER_RATE.to_string(),
+        "-c".to_string(),
+        "1".to_string(),
+        "-e".to_string(),
+        "signed-integer".to_string(),
+        "-b".to_string(),
+        "16".to_string(),
+        "-t".to_string(),
+        "raw".to_string(),
+        "-".to_string(),
+    ]
 }
 
 /// How many bytes `max_seconds` of 16 kHz mono 16-bit audio takes.
@@ -429,6 +535,74 @@ mod tests {
         let config = command_capture(&["blablablars-no-such-recorder"]);
         let error = Recording::start(&config).unwrap_err().to_string();
         assert!(error.contains("not found on PATH"), "{error}");
+    }
+
+    #[test]
+    fn every_platform_gets_a_way_to_record() {
+        let candidates = candidates();
+        assert!(candidates.len() >= 2, "there must always be a fallback");
+        // SoX is the last resort on all three systems: `-d` is the platform's
+        // default input device.
+        assert_eq!(candidates.last().unwrap().0, "sox");
+        if cfg!(target_os = "macos") {
+            assert!(candidates.iter().any(|(name, _)| *name == "ffmpeg"));
+        }
+        if cfg!(windows) {
+            assert!(candidates.iter().any(|(name, _)| *name == "ffmpeg"));
+        }
+        if cfg!(target_os = "linux") {
+            assert!(candidates
+                .iter()
+                .any(|(name, _)| matches!(*name, "parecord" | "pw-record" | "arecord")));
+        }
+    }
+
+    #[test]
+    fn the_ffmpeg_recorders_ask_for_the_same_pcm_everywhere() {
+        // macOS: CoreAudio inputs are `:INDEX`; the audio-only default is `:0`.
+        let mac = ffmpeg_avfoundation_args(None);
+        assert!(mac.windows(2).any(|pair| pair == ["-i", ":0"]));
+        let named = ffmpeg_avfoundation_args(Some("2"));
+        assert!(named.windows(2).any(|pair| pair == ["-i", ":2"]));
+        let full = ffmpeg_avfoundation_args(Some("0:2"));
+        assert!(full.windows(2).any(|pair| pair == ["-i", "0:2"]));
+
+        // Windows: DirectShow only accepts the device's own name.
+        let windows = ffmpeg_dshow_args(Some("Microphone (USB)"));
+        assert!(windows
+            .windows(2)
+            .any(|pair| pair == ["-i", "audio=Microphone (USB)"]));
+
+        for argv in [mac, windows] {
+            assert!(argv.windows(2).any(|pair| pair == ["-ar", "16000"]));
+            assert!(argv.windows(2).any(|pair| pair == ["-ac", "1"]));
+            assert!(argv.windows(2).any(|pair| pair == ["-f", "s16le"]));
+            assert_eq!(argv.last().unwrap(), "-", "PCM goes to stdout");
+        }
+    }
+
+    #[test]
+    fn sox_writes_raw_samples_to_stdout() {
+        let argv = sox_args(None);
+        assert!(argv.windows(2).any(|pair| pair == ["-t", "raw"]));
+        assert!(argv.windows(2).any(|pair| pair == ["-b", "16"]));
+        assert_eq!(argv.last().unwrap(), "-");
+        assert!(argv.contains(&"signed-integer".to_string()));
+    }
+
+    #[test]
+    fn a_platform_without_any_recorder_says_how_to_install_one() {
+        // The hint is built for the platform the test runs on, so it always
+        // names something that exists there.
+        let hint = install_hint();
+        assert!(hint.contains("PCM"));
+        if cfg!(windows) {
+            assert!(hint.contains("ffmpeg"), "{hint}");
+        } else if cfg!(target_os = "macos") {
+            assert!(hint.contains("brew"), "{hint}");
+        } else {
+            assert!(hint.contains("parecord"), "{hint}");
+        }
     }
 
     #[test]

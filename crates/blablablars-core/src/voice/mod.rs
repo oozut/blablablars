@@ -22,6 +22,7 @@ pub mod cleanup;
 pub mod config;
 pub mod inject;
 pub mod models;
+pub mod platform;
 pub mod transcribe;
 
 use std::path::Path;
@@ -94,17 +95,17 @@ impl Dictation {
         pipeline: Pipeline,
     ) -> Result<Self, CoreError> {
         let wanted = model.unwrap_or(&config.models.default);
-        // Only the whisper backend needs a real file on disk. A command backend
-        // may not use a ggml model at all (a streaming engine, a remote API), so
-        // an unresolved name is passed through as `{model}`.
-        let resolved = match config.transcriber.kind {
-            config::TranscriberKind::WhisperCli => {
-                models::resolve(&config.models.directory, wanted)?
-            }
-            config::TranscriberKind::Command => models::resolve(&config.models.directory, wanted)
-                .unwrap_or_else(|_| Model::unresolved(wanted)),
+        // Only a backend that runs a local model needs a real file on disk. A
+        // command backend may not use a local model at all (a streaming engine,
+        // a remote API), so an unresolved name is passed through as `{model}`.
+        let resolved = if config.transcriber.kind.needs_model_file() {
+            models::resolve(&config.models.directory, wanted)?
+        } else {
+            models::resolve(&config.models.directory, wanted)
+                .unwrap_or_else(|_| Model::unresolved(wanted))
         };
-        let transcriber = transcribe::from_config(&config.transcriber, &config.language, &resolved);
+        let transcriber =
+            transcribe::from_config(&config.transcriber, &config.language, &resolved)?;
         Ok(Self {
             config,
             model: resolved.name,

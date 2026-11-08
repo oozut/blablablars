@@ -68,7 +68,6 @@ dependencies = [
  "blablablars-core",
  "blablablars-pythonhost",
  "clap",
- "libc",
  "serde_json",
 ]
 

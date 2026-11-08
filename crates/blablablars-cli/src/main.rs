@@ -140,6 +140,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// List the transcription backends, which are installed, and what each can
+    /// run: whisper.cpp, NVIDIA Parakeet, ONNX Runtime (sherpa-onnx), or your
+    /// own command.
+    Engines {
+        /// Read this config instead of the default one.
+        #[arg(long, value_name = "FILE")]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Print version information.
     Version {
         #[arg(long)]
@@ -251,6 +261,7 @@ fn execute(cli: Cli) -> Result<(), CoreError> {
         Command::Dictate(args) => dictate::run(*args),
         Command::Config { action } => dictate::manage_config(action),
         Command::Models { config, json } => dictate::list_models(config.as_deref(), json),
+        Command::Engines { config, json } => dictate::list_engines(config.as_deref(), json),
         Command::Version { json } => {
             if json {
                 println!(

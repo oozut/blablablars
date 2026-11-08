@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::cleanup::CleanupOptions;
+use super::platform;
 use crate::error::CoreError;
 
 /// Environment variable pointing at an alternative config file.
@@ -74,12 +75,63 @@ impl Default for ModelsConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TranscriberKind {
-    /// The `whisper-cli` binary from whisper.cpp.
+    /// The `whisper-cli` binary from whisper.cpp: ggml `*.bin` models, CPU or
+    /// whatever GPU that build was compiled for.
     #[default]
     WhisperCli,
-    /// Any program: `argv` is a template with `{audio}`, `{model}` and
-    /// `{language}` placeholders, and its stdout is the transcript.
+    /// The `parakeet-cli` binary from the same ggml toolchain: NVIDIA Parakeet
+    /// TDT models, which are markedly faster than Whisper on a CPU. Its ggml
+    /// files are read exactly like whisper's.
+    Parakeet,
+    /// `sherpa-onnx`, the ONNX Runtime toolchain: Whisper ONNX, NVIDIA Parakeet
+    /// ONNX and the other transducer families. The model is a *folder* holding
+    /// `tokens.txt` plus encoder/decoder (and for transducers a joiner).
+    SherpaOnnx,
+    /// Any program: `argv` is a template with `{audio}`, `{model}`,
+    /// `{model_name}` and `{language}` placeholders, and its stdout is the
+    /// transcript. This is how `faster-whisper`, a Python `onnxruntime` script,
+    /// a remote API or a streaming engine is wired in without touching this
+    /// crate.
     Command,
+}
+
+impl TranscriberKind {
+    /// Every backend, in the order `blablablars engines` lists them.
+    pub const ALL: [TranscriberKind; 4] = [
+        Self::WhisperCli,
+        Self::Parakeet,
+        Self::SherpaOnnx,
+        Self::Command,
+    ];
+
+    /// The program that runs this kind when the config does not name one.
+    pub fn default_binary(self) -> &'static str {
+        match self {
+            Self::WhisperCli => "whisper-cli",
+            Self::Parakeet => "parakeet-cli",
+            Self::SherpaOnnx => "sherpa-onnx-offline",
+            Self::Command => "",
+        }
+    }
+
+    /// Whether the backend needs a real model on disk before it can run.
+    ///
+    /// A command backend may name something that is not a local file (a remote
+    /// model id, a streaming engine's own notion of a model), so it is allowed
+    /// to go unresolved.
+    pub fn needs_model_file(self) -> bool {
+        !matches!(self, Self::Command)
+    }
+
+    /// The word `blablablars engines` prints beside each backend.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::WhisperCli => "whisper.cpp (ggml models, CPU or GPU)",
+            Self::Parakeet => "NVIDIA Parakeet TDT through the ggml toolchain",
+            Self::SherpaOnnx => "ONNX Runtime through sherpa-onnx (Whisper, Parakeet, transducers)",
+            Self::Command => "any program that prints the transcript",
+        }
+    }
 }
 
 /// Whether to ask the backend for GPU compute.
@@ -98,16 +150,17 @@ pub enum GpuMode {
 #[serde(default, deny_unknown_fields)]
 pub struct TranscriberConfig {
     pub kind: TranscriberKind,
-    /// Program name or path for `kind: whisper-cli`.
-    pub binary: String,
+    /// Program name or path. Unset means the one this kind ships with
+    /// (`whisper-cli`, `parakeet-cli`, `sherpa-onnx-offline`).
+    pub binary: Option<String>,
     /// Full template for `kind: command`.
     pub argv: Vec<String>,
     /// Extra arguments appended after the built-in ones.
     pub extra_args: Vec<String>,
     pub gpu: GpuMode,
-    /// CPU threads for `kind: whisper-cli`. Unset lets the backend decide,
-    /// which is a safe default; dictation on an older CPU is noticeably faster
-    /// with it set to the number of physical cores.
+    /// CPU threads for the ggml backends and sherpa-onnx. Unset lets the backend
+    /// decide, which is a safe default; dictation on an older CPU is noticeably
+    /// faster with it set to the number of physical cores.
     pub threads: Option<u32>,
     /// A hung model must not hang the keyboard shortcut for ever.
     pub timeout_seconds: u64,
@@ -117,13 +170,23 @@ impl Default for TranscriberConfig {
     fn default() -> Self {
         Self {
             kind: TranscriberKind::WhisperCli,
-            binary: "whisper-cli".to_string(),
+            binary: None,
             argv: Vec::new(),
             extra_args: Vec::new(),
             gpu: GpuMode::Auto,
             threads: None,
             timeout_seconds: 180,
         }
+    }
+}
+
+impl TranscriberConfig {
+    /// The program this config runs, defaulted per kind.
+    pub fn program(&self) -> String {
+        self.binary
+            .clone()
+            .filter(|binary| !binary.trim().is_empty())
+            .unwrap_or_else(|| self.kind.default_binary().to_string())
     }
 }
 
@@ -144,6 +207,11 @@ pub enum OutputKind {
     /// `wtype`, for Wayland compositors that support the virtual-keyboard
     /// protocol (sway, hyprland, river, …).
     Wtype,
+    /// Put the text on the clipboard and send the paste keystroke: `pbcopy` +
+    /// AppleScript on macOS, `clip.exe` + PowerShell on Windows, `wl-copy` +
+    /// `wtype` or `xclip` + `xdotool` on Linux. `auto` picks this on macOS and
+    /// Windows, where no command can type text without a helper.
+    Paste,
 }
 
 /// How the text is delivered.
@@ -316,50 +384,18 @@ pub fn default_config_path() -> Option<PathBuf> {
 
 /// The directory that holds `config.yml` and the plugin list.
 pub fn config_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME") {
-        return Some(PathBuf::from(dir).join("blablablars"));
-    }
-    if cfg!(windows) {
-        if let Some(dir) = std::env::var_os("APPDATA") {
-            return Some(PathBuf::from(dir).join("blablablars"));
-        }
-    }
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config").join("blablablars"))
+    platform::config_dir()
 }
 
-/// Where models are looked for by default: `$XDG_DATA_HOME/blablablars/models`.
+/// Where models are looked for by default: `data_dir()/models`.
 pub fn default_model_directory() -> PathBuf {
-    if let Some(dir) = std::env::var_os("XDG_DATA_HOME") {
-        return PathBuf::from(dir).join("blablablars").join("models");
-    }
-    std::env::var_os("HOME")
-        .map(|home| {
-            PathBuf::from(home)
-                .join(".local")
-                .join("share")
-                .join("blablablars")
-                .join("models")
-        })
+    platform::data_dir()
+        .map(|dir| dir.join("models"))
         .unwrap_or_else(|| PathBuf::from("models"))
 }
 
 /// Expand a leading `~` to the user's home directory.
-pub fn expand_home(path: &Path) -> PathBuf {
-    let text = path.to_string_lossy();
-    let Some(rest) = text.strip_prefix('~') else {
-        return path.to_path_buf();
-    };
-    let home = match std::env::var_os("HOME") {
-        Some(home) => PathBuf::from(home),
-        None => return path.to_path_buf(),
-    };
-    let rest = rest.trim_start_matches(['/', '\\']);
-    if rest.is_empty() {
-        home
-    } else {
-        home.join(rest)
-    }
-}
+pub use platform::expand_home;
 
 #[cfg(test)]
 mod tests {
@@ -390,7 +426,7 @@ mod tests {
         assert_eq!(config.language, "en");
         assert_eq!(config.models.default, "ggml-small.en");
         // Untouched fields keep their defaults.
-        assert_eq!(config.transcriber.binary, "whisper-cli");
+        assert_eq!(config.transcriber.program(), "whisper-cli");
         assert_eq!(config.capture.max_seconds, 600.0);
     }
 
