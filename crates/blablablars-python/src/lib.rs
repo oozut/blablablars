@@ -213,9 +213,9 @@ impl Pipeline {
 
     /// Load a compiled Rust extension (`.so`/`.dylib`/`.dll`) into this process.
     ///
-    /// This is the same loader the `blablablars` binary uses for
-    /// `--rust-plugin`, so a Python user gets the in-process extension the Rust
-    /// application gets.
+    /// This is the same loader the `blablablars` binary uses for a
+    /// ``rust:PATH`` spec, so a Python user gets the in-process extension the
+    /// Rust application gets.
     fn register_rust_library(&mut self, path: &str) -> PyResult<()> {
         let extension = core::DynamicExtension::open(path).map_err(runtime_error)?;
         self.inner
@@ -320,6 +320,18 @@ fn hooks() -> Vec<String> {
     Pipeline::hooks()
 }
 
+/// Parse a plugin spec (`rust:PATH`, `python:PATH|MODULE`, `process:COMMAND`),
+/// returning `(kind, target)`.
+///
+/// The grammar lives in the Rust core, so the CLI, the environment variable, the
+/// config file and Python cannot drift apart.
+#[pyfunction]
+fn plugin_spec(raw: &str) -> PyResult<(String, String)> {
+    let spec =
+        core::PluginSpec::parse(raw).map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok((spec.kind().as_str().to_string(), spec.target().to_string()))
+}
+
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Analysis>()?;
@@ -327,6 +339,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Pipeline>()?;
     module.add_function(wrap_pyfunction!(analyse, module)?)?;
     module.add_function(wrap_pyfunction!(hooks, module)?)?;
+    module.add_function(wrap_pyfunction!(plugin_spec, module)?)?;
     module.add("__version__", VERSION)?;
     module.add("PROTOCOL_VERSION", core::PROTOCOL_VERSION)?;
     module.add("HOOK_INPUT", core::HOOK_INPUT)?;

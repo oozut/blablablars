@@ -7,10 +7,14 @@ interchangeable.
 
 | transport | runs where | written in | loaded by |
 | --- | --- | --- | --- |
-| **Rust library** | inside the `blablablars` process (`dlopen`) | Rust | `--rust-plugin`, `--rust-plugin-dir`, `$BLABLABLARS_RUST_PLUGINS`, `Pipeline.register_rust` |
-| **Python plugin** | inside the `blablablars` process (embedded CPython) | Python | `--python-plugin`, `$BLABLABLARS_PLUGINS`, `blablablars.plugins` entry points |
+| **Rust library** | inside the `blablablars` process (`dlopen`) | Rust | `--plugin rust:PATH`, `blablablars plugin add`, `Pipeline.register_rust` |
+| **Python plugin** | inside the `blablablars` process (embedded CPython) | Python | `--plugin python:PATH\|MODULE`, `blablablars plugin add`, `blablablars.plugins` entry points |
 | **Python callback** | inside a Python process | Python | `Pipeline.register` (PyO3) |
-| **Child process** | beside the `blablablars` process | anything | `--plugin`, `Pipeline.register_process` |
+| **Child process** | beside the `blablablars` process | anything | `--plugin process:COMMAND`, `Pipeline.register_process` |
+
+Naming one is always the same shape — `KIND:TARGET` — whether it appears in a
+flag, an environment variable, the plugin list or Python. See
+[`cli.md`](cli.md#plugin-specs).
 
 The first two are *in-process*: they are loaded into the running binary, share
 its address space and see the same hooks. The fourth exists for languages that
@@ -83,7 +87,7 @@ Build it and hand it to the application:
 ```bash
 cargo build --manifest-path examples/rust-plugin/Cargo.toml
 target/debug/blablablars run "hello" \
-  --rust-plugin target/plugin-fixture/debug/libblablablars_example_rust_plugin.so
+  --plugin rust:target/plugin-fixture/debug/libblablablars_example_rust_plugin.so
 ```
 
 Anything that can open the library can load it, including Python:
@@ -126,12 +130,13 @@ Run it *inside* the binary (needs the package on the interpreter's path):
 ```bash
 target/debug/blablablars run "hello" \
   --python-path python \
-  --python-plugin examples/python/hello_plugin.py
+  --plugin python:examples/python/hello_plugin.py
 ```
 
-`--python-plugin` accepts a `.py` file or an importable module name. Install
-plugins as packages and expose them through the `blablablars.plugins` entry-point
-group, or list files in `$BLABLABLARS_PLUGINS`, to make discovery automatic.
+A `python:` target is a `.py` file or an importable module name. Install plugins
+as packages and expose them through the `blablablars.plugins` entry-point group,
+or add them to the plugin list (`blablablars plugin add python:my_pkg.plugin`),
+to make discovery automatic.
 
 The class style is available too:
 
@@ -155,14 +160,18 @@ class Mark(Plugin):
 import blablablars
 
 pipeline = blablablars.Pipeline()
-pipeline.register(my_plugin)                      # Python callback, in-process
-pipeline.register_rust("libshout.so")             # Rust cdylib, in-process
-pipeline.register_rust_directory("plugins/rust/") # every .so in a directory
+pipeline.register(my_plugin)                       # Python callback, in-process
+pipeline.register_rust("libshout.so")              # Rust cdylib, in-process
+pipeline.register_rust_directory("plugins/rust/")  # every .so in a directory
 pipeline.register_process("python3 -m blablablars.runtime plugin.py")
+
+# Or by spec, exactly as a plugin list line:
+pipeline.load("rust:/opt/blablablars/libshout.so", "process:my-plugin --flag")
 ```
 
-`register_rust` and `register_rust_directory` use the same loader as the CLI, so
-a Rust extension behaves identically from either surface.
+`register_rust`, `register_rust_directory` and `load` use the same loader and the
+same spec grammar as the CLI, so an extension behaves identically from either
+surface.
 
 ## Loading from Rust
 
@@ -220,3 +229,9 @@ files, the environment, and everything else the process can. Only load
 extensions you would agree to run as the application itself. A child-process
 plugin is the choice when that is not acceptable — it can be sandboxed
 separately, at the cost of one JSON round-trip per hook.
+
+Because of that, the implicit sources are the ones you control: the plugin list
+in your own config directory and the environment you exported. Nothing is
+discovered by walking the current directory, so a repository you just cloned
+cannot run code because you ran `blablablars` inside it — a project that wants a
+fixed plugin list commits one and passes `--plugin-config FILE` explicitly.

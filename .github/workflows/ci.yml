@@ -64,8 +64,16 @@ jobs:
             --plugin "python -m blablablars.runtime examples/python/hello_plugin.py"
           echo "--- in process (Rust cdylib + embedded Python)"
           target/release/blablablars run "hello brave world" --json \
-            --rust-plugin target/plugin-fixture/debug/libblablablars_example_rust_plugin.so \
+            --plugin rust:target/plugin-fixture/debug/libblablablars_example_rust_plugin.so \
             --python-path python \
-            --python-plugin examples/python/hello_plugin.py
+            --plugin python:examples/python/hello_plugin.py
+      - name: The plugin list is the long-term attachment path
+        run: |
+          config="$RUNNER_TEMP/blablablars-plugins"
+          target/release/blablablars plugin add \
+            rust:target/plugin-fixture/debug/libblablablars_example_rust_plugin.so \
+            --config "$config"
+          target/release/blablablars plugin list --config "$config"
+          target/release/blablablars run "hello brave world" --json --plugin-config "$config"
       - name: CLI tests against the built package
         run: cargo test -p blablablars-cli

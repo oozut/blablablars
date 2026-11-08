@@ -4,11 +4,16 @@ Three sources, in order:
 
 1. explicitly passed entry points (used by tests),
 2. the ``blablablars.plugins`` entry-point group,
-3. files listed in ``$BLABLABLARS_PLUGINS`` (``os.pathsep``-separated).
+3. the specs listed in ``$BLABLABLARS_PLUGINS``, one per line.
 
 An entry point must load either a plugin object (anything with ``name``,
 ``hooks`` and ``call``) or a module whose functions are decorated with
 :func:`blablablars.hook`.
+
+``$BLABLABLARS_PLUGINS`` holds the same lines the ``blablablars`` binary reads,
+so one line feeds both: ``python:my_plugin.py``, ``python:my_company.audit``
+and a bare ``my_plugin.py`` are understood here. Specs for other transports
+(``rust:``, ``process:``) belong to the binary and are skipped.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ import os
 from pathlib import Path
 from typing import Any, Iterable
 
+from ._native import plugin_spec as _plugin_spec
 from .plugin import coerce_plugin
 
 ENTRY_POINT_GROUP = "blablablars.plugins"
@@ -65,9 +71,14 @@ def load_plugins(entry_points: Iterable[Any] | None = None) -> list[Any]:
         loaded = entry_point.load()
         found.append(coerce_plugin(loaded, name=getattr(entry_point, "name", None)))
 
-    for raw in os.environ.get(ENV_VAR, "").split(os.pathsep):
-        if raw.strip():
-            found.append(coerce_plugin(load_plugin_file(raw)))
+    for raw in os.environ.get(ENV_VAR, "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        kind, target = _plugin_spec(line)
+        if kind != "python":
+            continue
+        found.append(coerce_plugin(load_plugin_file(target)))
 
     return found
 

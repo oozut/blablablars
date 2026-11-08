@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 from typing import Any, Iterable
 
 from ._native import Pipeline as _NativePipeline
 from ._native import Run
+from ._native import plugin_spec as _plugin_spec
 from .plugin import HOOKS, Plugin, coerce_plugin
 
 
@@ -51,8 +53,8 @@ class Pipeline:
     def register_rust(self, path: str | os.PathLike[str]) -> None:
         """Load a compiled Rust extension (``.so``/``.dylib``/``.dll``) in-process.
 
-        Same loader as ``blablablars run --rust-plugin``; the extension sees the
-        same hooks as a Python one.
+        Same loader as the ``rust:PATH`` spec in ``blablablars run --plugin``;
+        the extension sees the same hooks as a Python one.
         """
         self._native.register_rust_library(os.fspath(path))
 
@@ -67,6 +69,27 @@ class Pipeline:
         ``"python3 -m blablablars.runtime my_plugin.py"``.
         """
         return self._native.register_process(command)
+
+    def load(self, *specs: str) -> list[str]:
+        """Attach plugins by spec, the way the command line does.
+
+        ``rust:PATH``, ``python:PATH|MODULE`` and ``process:COMMAND`` work here
+        too — the grammar and the inference for a bare value come from the Rust
+        core, so a line copied out of a plugin list means the same thing in
+        Python. Returns the names of the extensions that were attached.
+        """
+        attached: list[str] = []
+        for raw in specs:
+            kind, target = _plugin_spec(raw)
+            before = self.extensions
+            if kind == "rust":
+                self.register_rust(target)
+            elif kind == "process":
+                self.register_process(target)
+            else:
+                self.register(_import_python_plugin(target))
+            attached.extend(self.extensions[len(before) :])
+        return attached
 
     def unregister(self, name: str) -> bool:
         return self._native.unregister(name)
@@ -95,6 +118,16 @@ class Pipeline:
 
     def __repr__(self) -> str:
         return f"Pipeline(extensions={self.extensions!r})"
+
+
+def _import_python_plugin(target: str) -> Any:
+    """A path is imported as a file, anything else as a module."""
+    from .plugins import load_plugin_file
+
+    path = os.path.expanduser(target)
+    if path.endswith(".py") or os.path.isfile(path):
+        return load_plugin_file(path)
+    return importlib.import_module(target)
 
 
 __all__ = ["Pipeline", "HOOKS", "Plugin", "Run"]

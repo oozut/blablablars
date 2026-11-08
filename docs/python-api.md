@@ -148,28 +148,28 @@ Run it **inside** the binary (no second process; the interpreter is embedded):
 ```bash
 blablablars run "hello there" --json \
   --python-path python \
-  --python-plugin examples/python/hello_plugin.py
+  --plugin python:examples/python/hello_plugin.py
 ```
 
-`--python-plugin` takes a `.py` file or an importable module; `--python-path`
+A `python:` spec takes a `.py` file or an importable module; `--python-path`
 adds entries to `sys.path` (repeatable, or use `$BLABLABLARS_PYTHON_PATH`).
-`$BLABLABLARS_PLUGINS` lists plugin files to load, using the same variable the
-package's discovery reads.
+`$BLABLABLARS_PLUGINS` holds specs, one per line — the same lines the package's
+discovery reads. The grammar is [`docs/cli.md`](cli.md#plugin-specs).
 
 Or run it beside the binary as a child process (repeat `--plugin` to chain
 plugins):
 
 ```bash
 blablablars run "hello there" --json \
-  --plugin "python -m blablablars.runtime examples/python/hello_plugin.py"
+  --plugin "process:python -m blablablars.runtime examples/python/hello_plugin.py"
 ```
 
 The command line is split on whitespace, so no quoting support — use a wrapper
 script if you need arguments containing spaces.
 
-`blablablars plugins --plugin "..."` performs only the handshake and prints what
-the plugin reports, which is the fastest way to debug a plugin that does not
-start.
+`blablablars plugins --plugin "process:..."` performs only the handshake and
+prints what the plugin reports, which is the fastest way to debug a plugin that
+does not start.
 
 ## Discovery
 
@@ -178,7 +178,9 @@ start.
 1. the `blablablars.plugins` entry-point group (declare it in a package's
    `pyproject.toml`; the entry point must load a plugin object or a module of
    `@hook` functions);
-2. files listed in `$BLABLABLARS_PLUGINS`, separated by `os.pathsep`.
+2. the `python:` specs in `$BLABLABLARS_PLUGINS`, one per line — the same lines
+   the `blablablars` binary reads, so a plugin list and a shell can share them
+   (specs for other transports are left to the binary).
 
 ```python
 import blablablars

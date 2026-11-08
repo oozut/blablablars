@@ -31,6 +31,7 @@ from Python.
 cargo run -p blablablars-cli -- run "hello brave world"
 cargo run -p blablablars-cli -- run "hello brave world" --json
 cargo run -p blablablars-cli -- hooks
+cargo run -p blablablars-cli -- plugin add rust:/abs/path/libshout.so
 ```
 
 Build the shippable binary with `cargo build --release` (or `make build`); the
@@ -73,7 +74,7 @@ def shout(payload):
 ```bash
 ./target/release/blablablars run "hello there" \
   --python-path python \
-  --python-plugin examples/python/hello_plugin.py
+  --plugin python:examples/python/hello_plugin.py
 ```
 
 **Rust, inside the binary** — a `cdylib` + `export_plugin!`; see
@@ -82,7 +83,15 @@ def shout(payload):
 ```bash
 make example
 ./target/release/blablablars run "hello there" \
-  --rust-plugin target/plugin-fixture/debug/libblablablars_example_rust_plugin.so
+  --plugin rust:target/plugin-fixture/debug/libblablablars_example_rust_plugin.so
+```
+
+Or add it once and forget the flag — every run then picks it up
+([`docs/cli.md`](docs/cli.md)):
+
+```bash
+blablablars plugin add rust:/abs/path/libshout.so
+blablablars run "hello there"
 ```
 
 **From Python**, all of it at once:
@@ -100,8 +109,11 @@ pipeline.register_process("python3 -m blablablars.runtime plugin.py")
 
 ```bash
 ./target/release/blablablars run "hello there" \
-  --plugin "python -m blablablars.runtime examples/python/hello_plugin.py"
+  --plugin "process:python -m blablablars.runtime examples/python/hello_plugin.py"
 ```
+
+Every attachment is the same `KIND:TARGET` spec, in a flag, an environment
+variable, the plugin list or Python — see [`docs/cli.md`](docs/cli.md).
 
 `make demo` runs the child-process example, `make demo-inprocess` runs the Rust
 and embedded-Python extensions inside one binary.
@@ -121,7 +133,8 @@ python/
 examples/
   python/                a runnable Python plugin
   rust-plugin/           a runnable Rust extension (cdylib, own workspace)
-docs/                    architecture, extensions, Python API, wire protocol
+docs/                    architecture, command line, extensions, Python API,
+                         wire protocol
 ```
 
 ## Hooks

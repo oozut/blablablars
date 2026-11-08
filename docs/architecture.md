@@ -36,10 +36,10 @@ Three rules keep this honest:
 
 | transport | crate | how it is reached |
 | --- | --- | --- |
-| Rust `cdylib` | `core::loader` + `core::plugin_abi` | `--rust-plugin`, `Pipeline.register_rust` |
-| embedded Python | `blablablars-pythonhost` | `--python-plugin`, discovery entry points |
+| Rust `cdylib` | `core::loader` + `core::plugin_abi` | `--plugin rust:PATH`, `Pipeline.register_rust` |
+| embedded Python | `blablablars-pythonhost` | `--plugin python:PATH\|MODULE`, discovery entry points |
 | Python callback | `blablablars-python` (PyO3) | `Pipeline.register` |
-| child process | `core::host` | `--plugin`, `Pipeline.register_process` |
+| child process | `core::host` | `--plugin process:COMMAND`, `Pipeline.register_process` |
 
 All four are documented in [`extensions.md`](extensions.md).
 

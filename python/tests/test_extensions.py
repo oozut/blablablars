@@ -100,6 +100,33 @@ class MixedTransportTests(unittest.TestCase):
         self.assertEqual(pipeline.run("abc").analysis.text, "[shouted] ABC")
 
 
+class SpecTests(unittest.TestCase):
+    """The spec grammar is shared with the binary, so it must parse the same."""
+
+    def test_a_spec_names_its_transport(self) -> None:
+        pipeline = blablablars.Pipeline()
+        names = pipeline.load(
+            f"rust:{example_library()}",
+            f"process:{sys.executable} -m blablablars.runtime "
+            f"{ROOT / 'examples' / 'python' / 'hello_plugin.py'}",
+        )
+        self.assertEqual(names, ["shout", "hello_plugin"])
+
+    def test_a_bare_value_is_inferred_like_the_command_line(self) -> None:
+        pipeline = blablablars.Pipeline()
+        self.assertEqual(pipeline.load(str(example_library())), ["shout"])
+
+    def test_a_python_spec_is_imported_and_attached(self) -> None:
+        plugin = ROOT / "examples" / "python" / "hello_plugin.py"
+        pipeline = blablablars.Pipeline()
+        self.assertEqual(pipeline.load(f"python:{plugin}"), ["hello_plugin"])
+        self.assertEqual(pipeline.run("hi").analysis.text, "[shouted] HI")
+
+    def test_a_bad_spec_is_a_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            blablablars.Pipeline().load("python:")
+
+
 class _BracketPlugin(blablablars.Plugin):
     name = "bracket"
     hooks = (blablablars.HOOK_OUTPUT,)

@@ -59,9 +59,9 @@ demo: release ## Run the CLI with the example Python plugin (child process)
 
 demo-inprocess: release python-develop example ## Rust and Python extensions inside one binary
 	target/release/blablablars run "hello brave world" --json \
-		--rust-plugin "$(EXAMPLE_DIR)/debug/lib$(EXAMPLE_NAME).$(SOEXT)" \
+		--plugin "rust:$(EXAMPLE_DIR)/debug/lib$(EXAMPLE_NAME).$(SOEXT)" \
 		--python-path python \
-		--python-plugin examples/python/hello_plugin.py
+		--plugin python:examples/python/hello_plugin.py
 
 clean: ## Remove build artefacts
 	$(CARGO) clean

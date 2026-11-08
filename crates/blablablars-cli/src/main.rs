@@ -3,21 +3,31 @@
 //! This binary is the whole product: extensions of every supported kind run
 //! inside it (compiled Rust libraries and Python plugins, both in-process) or
 //! beside it (a child process speaking JSON on stdio).
+//!
+//! There is one way to name a plugin — the spec, `KIND:TARGET` — and one way to
+//! keep a list of them, the config file. See [`plugins`] for the sources and
+//! their order, and `blablablars plugin --help` for managing the list.
+
+mod plugins;
 
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
 
-use blablablars_core::{CoreError, DynamicExtension, Pipeline, ProcessExtension, HOOKS, VERSION};
+use blablablars_core::spec::{PluginKind, PluginSpec};
+use blablablars_core::{CoreError, HOOKS, VERSION};
 use clap::{Args, Parser, Subcommand};
+
+use crate::plugins::AttachOptions;
 
 #[derive(Debug, Parser)]
 #[command(
     name = "blablablars",
     version,
     about = "Analyse text through an extensible pipeline",
-    long_about = None
+    long_about = None,
+    after_long_help = "Plugins are named with a spec: rust:PATH, python:PATH|MODULE or \
+                       process:COMMAND.\nAdd them for every run with `blablablars plugin add SPEC`."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -25,37 +35,59 @@ struct Cli {
 }
 
 /// How extensions are attached, shared by every subcommand that runs a pipeline.
-///
-/// Extensions are registered in a fixed order — Rust, then Python, then child
-/// processes — and command-line flags come before the matching environment
-/// variable within each group, so a run is reproducible.
 #[derive(Debug, Default, Args)]
-struct ExtensionArgs {
-    /// Compiled Rust extension (`.so`, `.dylib`, `.dll`) loaded into this
-    /// process. Repeatable.
-    #[arg(long = "rust-plugin", value_name = "PATH")]
-    rust_plugins: Vec<String>,
+struct AttachArgs {
+    /// Attach a plugin for this run: `rust:PATH`, `python:PATH|MODULE` or
+    /// `process:COMMAND`. A bare value is inferred from its shape (`.so`,
+    /// `.dylib`, `.dll` → rust; `.py` → python; anything else → process).
+    /// Repeatable.
+    #[arg(long = "plugin", short = 'p', value_name = "SPEC")]
+    plugins: Vec<String>,
 
-    /// Directory scanned for Rust extensions (`*.so`, `*.dylib`, `*.dll`).
-    #[arg(long = "rust-plugin-dir", value_name = "DIR")]
-    rust_plugin_dirs: Vec<PathBuf>,
+    /// Attach every plugin found in a directory (`*.so`, `*.dylib`, `*.dll`,
+    /// `*.py`). Repeatable.
+    #[arg(long = "plugin-path", value_name = "DIR")]
+    plugin_paths: Vec<PathBuf>,
 
-    /// Python plugin file or importable module, executed inside this process by
-    /// the embedded interpreter. Repeatable.
-    #[cfg(feature = "python")]
-    #[arg(long = "python-plugin", value_name = "PATH|MODULE")]
-    python_plugins: Vec<String>,
+    /// Read this plugin list instead of the user's (`blablablars plugin add
+    /// --config FILE` writes one).
+    #[arg(long = "plugin-config", value_name = "FILE")]
+    plugin_config: Option<PathBuf>,
+
+    /// Ignore `BLABLABLARS_PLUGINS`, `BLABLABLARS_PLUGIN_PATH` and the config
+    /// file. `--plugin` and `--plugin-path` still apply.
+    #[arg(long = "no-plugins")]
+    no_plugins: bool,
 
     /// Directory added to the embedded interpreter's `sys.path`, for plugins and
     /// for the `blablablars` package itself. Repeatable.
     #[cfg(feature = "python")]
     #[arg(long = "python-path", value_name = "DIR")]
     python_paths: Vec<PathBuf>,
+}
 
-    /// Command line of a plugin that runs as its own process, in any language,
-    /// e.g. "python3 -m blablablars.runtime my_plugin.py". Repeatable.
-    #[arg(long = "plugin", value_name = "COMMAND")]
-    process_plugins: Vec<String>,
+impl AttachArgs {
+    /// Turn the flags into the options the loader works with.
+    fn options(&self) -> Result<AttachOptions, CoreError> {
+        let mut options = AttachOptions {
+            specs: self
+                .plugins
+                .iter()
+                .map(|raw| PluginSpec::parse(raw))
+                .collect::<Result<Vec<_>, _>>()?,
+            directories: self.plugin_paths.clone(),
+            config: self.plugin_config.clone(),
+            #[cfg(feature = "python")]
+            python_paths: self.python_paths.clone(),
+            #[cfg(not(feature = "python"))]
+            python_paths: Vec::new(),
+            implicit: false,
+        };
+        if !self.no_plugins {
+            options = options.with_implicit_sources();
+        }
+        Ok(options)
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -68,7 +100,7 @@ enum Command {
         #[arg(long)]
         json: bool,
         #[command(flatten)]
-        extensions: ExtensionArgs,
+        attach: AttachArgs,
     },
     /// List the hook vocabulary extensions can subscribe to.
     Hooks {
@@ -76,17 +108,65 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Attach the given extensions and print what they report about themselves.
+    /// Attach the plugins this run would load and print what they report about
+    /// themselves.
     Plugins {
         #[command(flatten)]
-        extensions: ExtensionArgs,
+        attach: AttachArgs,
         #[arg(long)]
         json: bool,
+    },
+    /// Manage the plugin list that every run reads (`add`, `list`, `remove`,
+    /// `path`).
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
     },
     /// Print version information.
     Version {
         #[arg(long)]
         json: bool,
+    },
+}
+
+/// The long-term interface for adding plugins: write a spec to the config file
+/// once, and every run picks it up.
+#[derive(Debug, Subcommand)]
+enum PluginAction {
+    /// Add specs to the plugin list. Existing lines are left alone and a spec
+    /// is never stored twice.
+    Add {
+        /// What to add: `rust:PATH`, `python:PATH|MODULE`, `process:COMMAND`, or
+        /// a bare value inferred from its shape.
+        #[arg(value_name = "SPEC", required = true)]
+        specs: Vec<String>,
+        /// Write to this file instead of the user's plugin list.
+        #[arg(long, value_name = "FILE")]
+        config: Option<PathBuf>,
+    },
+    /// List the specs in the plugin list, one per line.
+    List {
+        /// Read this file instead of the user's plugin list.
+        #[arg(long, value_name = "FILE")]
+        config: Option<PathBuf>,
+        /// Print as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove specs from the plugin list.
+    Remove {
+        /// What to remove; matched against the stored, canonical spec.
+        #[arg(value_name = "SPEC", required = true)]
+        specs: Vec<String>,
+        /// Remove from this file instead of the user's plugin list.
+        #[arg(long, value_name = "FILE")]
+        config: Option<PathBuf>,
+    },
+    /// Print the plugin list that would be read, without reading it.
+    Path {
+        /// Path that would be used instead of the user's plugin list.
+        #[arg(long, value_name = "FILE")]
+        config: Option<PathBuf>,
     },
 }
 
@@ -103,12 +183,8 @@ fn main() -> ExitCode {
 
 fn execute(cli: Cli) -> Result<(), CoreError> {
     match cli.command {
-        Command::Run {
-            text,
-            json,
-            extensions,
-        } => {
-            let pipeline = build_pipeline(&extensions)?;
+        Command::Run { text, json, attach } => {
+            let pipeline = plugins::build(&attach.options()?)?;
             let text = match text {
                 Some(text) => text,
                 None => read_stdin()?,
@@ -139,13 +215,13 @@ fn execute(cli: Cli) -> Result<(), CoreError> {
             }
             Ok(())
         }
-        Command::Plugins { extensions, json } => {
-            let pipeline = build_pipeline(&extensions)?;
+        Command::Plugins { attach, json } => {
+            let pipeline = plugins::build(&attach.options()?)?;
             let described = pipeline.registry().describe();
             if json {
                 println!("{}", serde_json::to_string_pretty(&described)?);
             } else if described.is_empty() {
-                println!("(no extensions attached)");
+                println!("(no plugins attached)");
             } else {
                 for info in described {
                     println!("{}: {}", info.name, info.hooks.join(", "));
@@ -153,6 +229,7 @@ fn execute(cli: Cli) -> Result<(), CoreError> {
             }
             Ok(())
         }
+        Command::Plugin { action } => manage_plugins(action),
         Command::Version { json } => {
             if json {
                 println!(
@@ -162,11 +239,13 @@ fn execute(cli: Cli) -> Result<(), CoreError> {
                         "version": VERSION,
                         "protocol": blablablars_core::PROTOCOL_VERSION,
                         "hooks": HOOKS,
+                        "plugin_kinds": PluginKind::ALL.map(PluginKind::as_str),
                         "transports": {
                             "rust": true,
                             "python": cfg!(feature = "python"),
                             "process": true,
                         },
+                        "plugin_config": plugins::config_file(None)?,
                     }))?
                 );
             } else {
@@ -177,71 +256,76 @@ fn execute(cli: Cli) -> Result<(), CoreError> {
     }
 }
 
-/// Attach every extension named on the command line or in the environment.
-///
-/// Environment variables (all `PATH`-separator lists):
-/// `BLABLABLARS_RUST_PLUGINS`, `BLABLABLARS_RUST_PLUGIN_DIRS`,
-/// `BLABLABLARS_PLUGINS` (the same variable the Python package uses),
-/// `BLABLABLARS_PYTHON_PATH`.
-fn build_pipeline(args: &ExtensionArgs) -> Result<Pipeline, CoreError> {
-    let mut pipeline = Pipeline::new();
-
-    let mut rust_paths: Vec<PathBuf> = args.rust_plugins.iter().map(PathBuf::from).collect();
-    rust_paths.extend(env_paths("BLABLABLARS_RUST_PLUGINS"));
-    for path in &rust_paths {
-        pipeline.register(Arc::new(DynamicExtension::open(path)?))?;
-    }
-
-    let mut rust_dirs: Vec<PathBuf> = args.rust_plugin_dirs.clone();
-    rust_dirs.extend(env_paths("BLABLABLARS_RUST_PLUGIN_DIRS"));
-    for extension in DynamicExtension::open_directories(rust_dirs)? {
-        pipeline.register(Arc::new(extension))?;
-    }
-
-    #[cfg(feature = "python")]
-    {
-        let mut search_paths: Vec<PathBuf> = args.python_paths.clone();
-        search_paths.extend(env_paths("BLABLABLARS_PYTHON_PATH"));
-
-        let mut python_plugins: Vec<String> = args.python_plugins.clone();
-        python_plugins.extend(
-            env_paths("BLABLABLARS_PLUGINS")
-                .into_iter()
-                .map(|path| path.to_string_lossy().into_owned()),
-        );
-
-        if !search_paths.is_empty() || !python_plugins.is_empty() {
-            blablablars_pythonhost::initialize(&search_paths)?;
+fn manage_plugins(action: PluginAction) -> Result<(), CoreError> {
+    match action {
+        PluginAction::Add { specs, config } => {
+            let config = plugins::config_file(config.as_deref())?;
+            for raw in &specs {
+                let spec = PluginSpec::parse(raw)?;
+                let outcome = plugins::add(&config, &spec)?;
+                if outcome.added() {
+                    println!("added {} to {}", outcome.spec(), config.display());
+                } else {
+                    println!("already in {}: {}", config.display(), outcome.spec());
+                }
+            }
+            Ok(())
         }
-        for plugin in &python_plugins {
-            pipeline.register(blablablars_pythonhost::load_path_or_module(plugin)?)?;
+        PluginAction::List { config, json } => {
+            let config = plugins::config_file(config.as_deref())?;
+            let specs = plugins::read_config(&config)?;
+            if json {
+                let plugins: Vec<_> = specs
+                    .iter()
+                    .map(|spec| {
+                        serde_json::json!({
+                            "spec": spec.to_string(),
+                            "kind": spec.kind().as_str(),
+                            "target": spec.target(),
+                        })
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "config": config,
+                        "plugins": plugins,
+                    }))?
+                );
+            } else if specs.is_empty() {
+                println!("(no plugins in {})", config.display());
+            } else {
+                for spec in &specs {
+                    println!("{spec}");
+                }
+            }
+            Ok(())
         }
-    }
-    #[cfg(not(feature = "python"))]
-    {
-        // `--python-plugin` does not exist in this build, but the environment
-        // could still ask for one; say so instead of silently ignoring it.
-        if std::env::var_os("BLABLABLARS_PLUGINS").is_some() {
-            return Err(CoreError::Plugin(
-                "this build was compiled without embedded Python \
-                 (rebuild with the default features) — use --plugin instead"
-                    .to_string(),
-            ));
+        PluginAction::Remove { specs, config } => {
+            let config = plugins::config_file(config.as_deref())?;
+            let mut failures = Vec::new();
+            for raw in &specs {
+                let spec = PluginSpec::parse(raw)?;
+                if plugins::remove(&config, &spec)? {
+                    println!("removed {} from {}", spec, config.display());
+                } else {
+                    failures.push(spec.to_string());
+                }
+            }
+            if failures.is_empty() {
+                return Ok(());
+            }
+            Err(CoreError::Plugin(format!(
+                "not in {}: {}",
+                config.display(),
+                failures.join(", ")
+            )))
         }
-    }
-
-    for command in &args.process_plugins {
-        pipeline.register(Arc::new(ProcessExtension::spawn_line(command)?))?;
-    }
-
-    Ok(pipeline)
-}
-
-/// A `PATH`-separated list from the environment, empty when unset.
-fn env_paths(name: &str) -> Vec<PathBuf> {
-    match std::env::var_os(name) {
-        Some(value) if !value.is_empty() => std::env::split_paths(&value).collect(),
-        _ => Vec::new(),
+        PluginAction::Path { config } => {
+            let config = plugins::config_file(config.as_deref())?;
+            println!("{}", config.display());
+            Ok(())
+        }
     }
 }
 

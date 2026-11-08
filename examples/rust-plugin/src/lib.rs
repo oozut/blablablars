@@ -1,5 +1,5 @@
 //! Example Rust extension, built as a `cdylib` and loaded by the running
-//! application (`blablablars run --rust-plugin <path-to-this-.so>`).
+//! application (`blablablars run --plugin rust:<path-to-this-.so>`).
 //!
 //! ```sh
 //! cargo build --manifest-path examples/rust-plugin/Cargo.toml

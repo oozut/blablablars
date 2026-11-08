@@ -42,6 +42,8 @@ pub enum CoreError {
     #[error(transparent)]
     Extension(#[from] ExtensionError),
     #[error(transparent)]
+    Spec(#[from] crate::spec::SpecError),
+    #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),

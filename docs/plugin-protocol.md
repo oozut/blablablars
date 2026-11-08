@@ -104,5 +104,6 @@ Read a line, parse it, and dispatch on `method`:
   the resulting payload;
 * `shutdown` → answer, flush, exit.
 
-Flush stdout after every response. Then pass `--plugin "<your command>"` to
+Flush stdout after every response. Then pass
+`--plugin "process:<your command>"` to
 `blablablars`.

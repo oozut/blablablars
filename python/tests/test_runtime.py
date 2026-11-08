@@ -179,7 +179,16 @@ class LoaderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = write_plugin(directory)
             previous = os.environ.get(ENV_VAR)
-            os.environ[ENV_VAR] = str(path)
+            # The same lines the binary reads: one spec per line, `#` comments,
+            # and specs for other transports left to the binary.
+            os.environ[ENV_VAR] = "\n".join(
+                [
+                    "# my plugins",
+                    "",
+                    "rust:/opt/libshout.so",
+                    f"python:{path}",
+                ]
+            )
             try:
                 plugins = load_plugins(entry_points=[])
             finally:

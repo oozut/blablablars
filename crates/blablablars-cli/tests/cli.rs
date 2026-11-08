@@ -255,13 +255,8 @@ def shout(payload):
 #[test]
 fn a_rust_extension_runs_inside_the_binary() {
     let library = rust_extension();
-    let output = run(&[
-        "run",
-        "hello brave world",
-        "--json",
-        "--rust-plugin",
-        &library.display().to_string(),
-    ]);
+    let spec = format!("rust:{}", library.display());
+    let output = run(&["run", "hello brave world", "--json", "--plugin", &spec]);
 
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let payload = json(&output);
@@ -281,16 +276,18 @@ fn in_process_rust_and_python_extensions_share_one_pipeline() {
     };
     let plugin = temporary_plugin("in-process", IN_PROCESS_PLUGIN);
 
+    let rust_spec = format!("rust:{}", library.display());
+    let python_spec = format!("python:{}", plugin.display());
     let output = run(&[
         "run",
         "hi",
         "--json",
-        "--rust-plugin",
-        &library.display().to_string(),
+        "--plugin",
+        &rust_spec,
+        "--plugin",
+        &python_spec,
         "--python-path",
         &package.display().to_string(),
-        "--python-plugin",
-        &plugin.display().to_string(),
     ]);
 
     assert!(output.status.success(), "stderr: {}", stderr(&output));
@@ -315,7 +312,8 @@ fn python_plugins_can_be_loaded_from_the_environment() {
     let output = blablablars()
         .args(["plugins"])
         .env("BLABLABLARS_PYTHON_PATH", &package)
-        .env("BLABLABLARS_PLUGINS", &plugin)
+        // One spec per line, the same format as the config file.
+        .env("BLABLABLARS_PLUGINS", plugin.display().to_string())
         .output()
         .expect("the binary should run");
 
@@ -325,7 +323,227 @@ fn python_plugins_can_be_loaded_from_the_environment() {
 
 #[test]
 fn a_missing_rust_extension_fails_with_a_message() {
-    let output = run(&["run", "hi", "--rust-plugin", "/nonexistent/plugin.so"]);
+    let output = run(&["run", "hi", "--plugin", "rust:/nonexistent/plugin.so"]);
     assert!(!output.status.success());
-    assert!(stderr(&output).contains("could not load the shared library"));
+    let message = stderr(&output);
+    assert!(
+        message.contains("could not load the shared library"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_bare_spec_is_read_by_its_shape() {
+    let library = rust_extension();
+    let output = run(&["plugins", "--plugin", &library.display().to_string()]);
+
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "shout: pipeline.input, pipeline.output\n");
+}
+
+#[test]
+fn a_directory_contributes_one_plugin_per_file() {
+    let directory = scratch("plugin-dir");
+    let library = rust_extension();
+    std::fs::copy(&library, directory.join(fixture_library_name()))
+        .expect("the fixture should be copyable");
+    std::fs::write(directory.join("ignored.txt"), "not a plugin").expect("writable");
+
+    let output = run(&["plugins", "--plugin-path", &directory.display().to_string()]);
+
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "shout: pipeline.input, pipeline.output\n");
+}
+
+#[test]
+fn an_unreadable_spec_says_what_to_write() {
+    let output = run(&["run", "hi", "--plugin", "python:"]);
+    assert!(!output.status.success());
+    let message = stderr(&output);
+    assert!(message.contains("no target after the prefix"), "{message}");
+}
+
+// ---------------------------------------------------------------------------
+// The plugin list: `blablablars plugin add|list|remove|path`.
+// ---------------------------------------------------------------------------
+
+fn scratch(name: &str) -> PathBuf {
+    let directory =
+        std::env::temp_dir().join(format!("blablablars-cli-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("temp dir should be creatable");
+    directory
+}
+
+#[test]
+fn a_plugin_added_to_the_list_is_loaded_by_every_run() {
+    let config = scratch("add").join("plugins");
+    let config = config.display().to_string();
+    let library = rust_extension();
+
+    let added = run(&[
+        "plugin",
+        "add",
+        &library.display().to_string(),
+        "--config",
+        &config,
+    ]);
+    assert!(added.status.success(), "stderr: {}", stderr(&added));
+    assert!(stdout(&added).contains("added rust:"), "{}", stdout(&added));
+
+    // Added twice on purpose: the second time must not duplicate the line.
+    let again = run(&[
+        "plugin",
+        "add",
+        &library.display().to_string(),
+        "--config",
+        &config,
+    ]);
+    assert!(again.status.success(), "stderr: {}", stderr(&again));
+    assert!(stdout(&again).contains("already in"), "{}", stdout(&again));
+
+    let listed = run(&["plugin", "list", "--config", &config]);
+    assert_eq!(stdout(&listed).trim().matches("rust:").count(), 1);
+
+    // Every run reads that list -- no flags needed beyond the file.
+    let output = run(&["run", "hi", "--json", "--plugin-config", &config]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(json(&output)["analysis"]["text"], "[shouted] HI");
+
+    let removed = run(&[
+        "plugin",
+        "remove",
+        &library.display().to_string(),
+        "--config",
+        &config,
+    ]);
+    assert!(removed.status.success(), "stderr: {}", stderr(&removed));
+
+    let output = run(&["run", "hi", "--json", "--plugin-config", &config]);
+    assert_eq!(json(&output)["analysis"]["text"], "hi");
+
+    // Removing what is not there is a failure, so scripts notice.
+    let missing = run(&[
+        "plugin",
+        "remove",
+        &library.display().to_string(),
+        "--config",
+        &config,
+    ]);
+    assert!(!missing.status.success());
+    assert!(stderr(&missing).contains("not in"));
+}
+
+#[test]
+fn the_plugin_list_is_machine_readable() {
+    let config = scratch("list-json").join("plugins");
+    let config = config.display().to_string();
+    let library = rust_extension();
+    run(&[
+        "plugin",
+        "add",
+        &library.display().to_string(),
+        "--config",
+        &config,
+    ]);
+
+    let payload = json(&run(&["plugin", "list", "--json", "--config", &config]));
+    assert_eq!(payload["config"], config);
+    assert_eq!(payload["plugins"][0]["kind"], "rust");
+    assert!(payload["plugins"][0]["target"]
+        .as_str()
+        .expect("a target")
+        .ends_with(&fixture_library_name()));
+}
+
+#[test]
+fn the_plugin_list_path_can_be_asked_for() {
+    let directory = scratch("path");
+    let config = directory.join("plugins");
+
+    let printed = run(&["plugin", "path", "--config", &config.display().to_string()]);
+    assert!(printed.status.success(), "stderr: {}", stderr(&printed));
+    assert_eq!(stdout(&printed).trim(), config.display().to_string());
+
+    // Without --config the user's own file is the one that would be read, and
+    // XDG_CONFIG_HOME decides where it lives.
+    let printed = blablablars()
+        .args(["plugin", "path"])
+        .env("XDG_CONFIG_HOME", &directory)
+        .output()
+        .expect("the binary should run");
+    assert_eq!(
+        stdout(&printed).trim(),
+        directory
+            .join("blablablars")
+            .join("plugins")
+            .display()
+            .to_string()
+    );
+}
+
+#[test]
+fn no_plugins_ignores_the_list_and_the_environment() {
+    let directory = scratch("no-plugins");
+    let config = directory.join("plugins");
+    let library = rust_extension();
+    std::fs::write(&config, format!("rust:{}\n", library.display())).expect("writable");
+
+    let loaded = run(&[
+        "run",
+        "hi",
+        "--json",
+        "--plugin-config",
+        &config.display().to_string(),
+    ]);
+    assert_eq!(json(&loaded)["analysis"]["text"], "[shouted] HI");
+
+    let ignored = run(&[
+        "run",
+        "hi",
+        "--json",
+        "--no-plugins",
+        "--plugin-config",
+        &config.display().to_string(),
+    ]);
+    assert_eq!(json(&ignored)["analysis"]["text"], "hi");
+
+    // Explicit flags are not "implicit": they still apply.
+    let explicit = format!("rust:{}", library.display());
+    let still = run(&["run", "hi", "--json", "--no-plugins", "--plugin", &explicit]);
+    assert_eq!(json(&still)["analysis"]["text"], "[shouted] HI");
+}
+
+#[test]
+fn the_environment_holds_specs_one_per_line() {
+    let library = rust_extension();
+    let specs = format!(
+        "# a comment\nrust:{}\nprocess:python3 {}",
+        library.display(),
+        temporary_plugin("env-order", UPPERCASE_PLUGIN).display()
+    );
+
+    let output = blablablars()
+        .args(["run", "hi", "--json"])
+        .env("BLABLABLARS_PLUGINS", specs)
+        // Keep the developer's own plugin list out of the test.
+        .env(
+            "BLABLABLARS_PLUGIN_CONFIG",
+            scratch("env-empty").join("plugins"),
+        )
+        .env_remove("BLABLABLARS_PLUGIN_PATH")
+        .output()
+        .expect("the binary should run");
+
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let payload = json(&output);
+    // Both plugins ran, in spec order: the Rust one subscribes twice.
+    assert_eq!(
+        payload["trace"],
+        serde_json::json!([
+            "shout: pipeline.input",
+            "uppercase: pipeline.input",
+            "shout: pipeline.output"
+        ])
+    );
 }
