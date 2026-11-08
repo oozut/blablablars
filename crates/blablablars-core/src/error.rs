@@ -43,6 +43,10 @@ pub enum CoreError {
     Extension(#[from] ExtensionError),
     #[error(transparent)]
     Spec(#[from] crate::spec::SpecError),
+    /// Something in the dictation path could not be done: no microphone, no
+    /// model, a backend that failed, a tool that cannot type.
+    #[error("{0}")]
+    Voice(String),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]

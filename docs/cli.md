@@ -9,6 +9,9 @@ blablablars run [TEXT] [--json] [attachment flags]   # analyse text
 blablablars hooks [--json]                           # the hook vocabulary
 blablablars plugins [attachment flags] [--json]       # what this run attaches
 blablablars plugin add|list|remove|path               # the plugin list
+blablablars dictate [--toggle|--seconds N|--input F]  # record, transcribe, type
+blablablars config init|show|path                     # the dictation config
+blablablars models [--json]                           # models that were found
 blablablars version [--json]
 ```
 
@@ -114,6 +117,34 @@ and comment, and fails when nothing matched so scripts can notice.
 
 `blablablars plugins` is the check: it attaches everything and reports each
 extension's name and hooks, which is exactly what a start-up would see.
+
+## Dictation
+
+`dictate` is the voice side of the same binary: record, transcribe through a
+backend, clean up, and type into the focused window. Its flags are shortcuts for
+config settings, and the whole feature is documented in
+[`dictation.md`](dictation.md).
+
+| flag | meaning |
+| --- | --- |
+| `--toggle` | start a detached recording, or stop the one running |
+| `--seconds N` | record for a fixed time |
+| `--input FILE` | transcribe a WAV file instead of recording |
+| `--config FILE` | the dictation config to read |
+| `--model NAME` | override `models.default` for this run |
+| `--language LANG` | override `language` (`auto` detects it) |
+| `--output KIND` | `auto`, `stdout`, `command`, `xdotool`, `wtype` |
+| `--print` | print instead of typing (same as `--output stdout`) |
+| `--no-cleanup` | type the transcript exactly as the model produced it |
+| `--json` | report the run instead of typing it |
+
+`dictate` accepts the plugin flags above, so extensions can rewrite the
+transcript through the `transcription.raw` and `transcription.text` hooks.
+
+`config init [--path FILE] [--force]` writes a config with every default in it,
+`config show` prints the config in effect, and `config path` prints the file that
+would be read. `models` lists what is in `models.directory`; `--json` gives
+`{"directory", "default", "models": [{"name","file","bytes","size","default"}]}`.
 
 ## Adding a transport (for maintainers)
 

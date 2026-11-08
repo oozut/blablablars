@@ -8,6 +8,7 @@
 //! keep a list of them, the config file. See [`plugins`] for the sources and
 //! their order, and `blablablars plugin --help` for managing the list.
 
+mod dictate;
 mod plugins;
 
 use std::io::{IsTerminal, Read};
@@ -122,6 +123,23 @@ enum Command {
         #[command(subcommand)]
         action: PluginAction,
     },
+    /// Record, transcribe and type: press a shortcut, speak, the words appear.
+    ///
+    /// Without `--toggle`, `--seconds` or `--input`, it records until Enter.
+    Dictate(Box<dictate::DictateArgs>),
+    /// Write, show or locate the dictation config.
+    Config {
+        #[command(subcommand)]
+        action: dictate::ConfigAction,
+    },
+    /// List the models found in the configured model directory.
+    Models {
+        /// Read this config instead of the default one.
+        #[arg(long, value_name = "FILE")]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Print version information.
     Version {
         #[arg(long)]
@@ -230,6 +248,9 @@ fn execute(cli: Cli) -> Result<(), CoreError> {
             Ok(())
         }
         Command::Plugin { action } => manage_plugins(action),
+        Command::Dictate(args) => dictate::run(*args),
+        Command::Config { action } => dictate::manage_config(action),
+        Command::Models { config, json } => dictate::list_models(config.as_deref(), json),
         Command::Version { json } => {
             if json {
                 println!(

@@ -88,6 +88,13 @@ may only write protocol JSON to stdout, diagnostics belong on stderr.
   `crates/blablablars-core/src/extension.rs` — the Python package derives its
   `HOOKS` from the native module automatically, so both sides update together.
 
+The voice feature is the same shape one level down: `voice/mod.rs` joins
+`Recording` (a child process writing PCM), `Transcriber`, the cleanup functions
+and `Injector` (all behind traits) with the same `Pipeline`, so a plugin sees a
+dictation exactly where it would see a `run`. A new backend is a new
+implementation of one of those traits, or a `kind: command` config entry — never
+a change to `Dictation`.
+
 Any new field on `Analysis` needs `blablablars-python/src/lib.rs` updated (the
 `Analysis` pyclass mirrors it). That duplication is the price of a typed Python
 API; `tests/test_api.py` and the Rust unit tests pin the shape.

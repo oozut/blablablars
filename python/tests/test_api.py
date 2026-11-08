@@ -11,7 +11,15 @@ class NativeModuleTests(unittest.TestCase):
     def test_version_and_protocol_are_exposed(self) -> None:
         self.assertRegex(blablablars.__version__, r"^\d+\.\d+\.\d+")
         self.assertEqual(blablablars.PROTOCOL_VERSION, 1)
-        self.assertEqual(blablablars.hooks(), ["pipeline.input", "pipeline.output"])
+        self.assertEqual(
+            blablablars.hooks(),
+            [
+                "pipeline.input",
+                "pipeline.output",
+                "transcription.raw",
+                "transcription.text",
+            ],
+        )
 
     def test_analyse_is_pure_and_unicode_aware(self) -> None:
         analysis = blablablars.analyse("héllo wörld")
@@ -47,7 +55,13 @@ class PipelineTests(unittest.TestCase):
     def test_hooks_and_describe(self) -> None:
         pipeline = blablablars.Pipeline()
         self.assertEqual(
-            pipeline.hooks, ("pipeline.input", "pipeline.output")
+            pipeline.hooks,
+            (
+                "pipeline.input",
+                "pipeline.output",
+                "transcription.raw",
+                "transcription.text",
+            ),
         )
         self.assertEqual(pipeline.describe(), [])
 

@@ -23,9 +23,11 @@ cannot be loaded and for plugins that must be isolated; see
 
 ## The contract
 
-* A hook is a name from a fixed vocabulary (`blablablars hooks`): currently
-  `pipeline.input` (payload `{"text": "..."}`) and `pipeline.output` (payload
-  `{"analysis": {...}}`).
+* A hook is a name from a fixed vocabulary (`blablablars hooks`):
+  `pipeline.input` (payload `{"text": "..."}`), `pipeline.output` (payload
+  `{"analysis": {...}}`), and the two dictation hooks
+  `transcription.raw`/`transcription.text` (payload `{"text": "..."}`, the first
+  also carrying `audio_seconds`, `model` and `transcriber`).
 * An extension declares its name and the hooks it subscribes to, and answers
   `call(hook, payload) -> payload`.
 * Returning `null`/`None` means "leave the payload alone".

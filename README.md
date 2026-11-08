@@ -4,11 +4,11 @@ One core, two surfaces: a Rust application you can ship as a single binary, and 
 Python package built from the *same* core so people can call it and extend it
 from Python.
 
-> **Status: initial scaffold (0.1.0).** The plumbing — workspace, PyO3 bindings,
-> extension registry, plugin protocol, CLI, tests, CI — is real and tested. The
-> built-in capability is deliberately small (text in, word/character/digest
-> analysis out) so the seams are exercised; swap in the actual domain logic in
-> `crates/blablablars-core/src/pipeline.rs` when it is decided.
+> **Status: early (0.1.0).** The plumbing — workspace, PyO3 bindings, extension
+> registry, plugin protocol, CLI, tests, CI — is real and tested, and the first
+> real capability is in: local dictation (`blablablars dictate`). The text
+> analysis in `crates/blablablars-core/src/pipeline.rs` is still deliberately
+> small so the seams stay visible.
 
 ## Why this shape
 
@@ -54,6 +54,24 @@ import blablablars
 result = blablablars.Pipeline().run("hello brave world")
 print(result.analysis.words, result.analysis.digest)
 ```
+
+## Quick start — voice
+
+Dictation is one binary and one config: press a shortcut, speak, and the words
+are typed into the focused window.
+
+```bash
+blablablars config init                 # every setting, at its defaults
+blablablars models                      # what is in the model directory
+blablablars dictate --toggle            # bind this to a key
+```
+
+Capture, transcription, cleanup and delivery are four replaceable pieces joined
+in one place: the recorder is a child process writing raw PCM (no audio library
+to link), the transcriber is `whisper-cli` or any command, cleanup is pure
+functions, and delivery is `xdotool`/`wtype`/your own command/stdout. Two hooks —
+`transcription.raw` and `transcription.text` — let extensions rewrite the
+transcript. See [`docs/dictation.md`](docs/dictation.md).
 
 ## Extensions
 
@@ -133,8 +151,8 @@ python/
 examples/
   python/                a runnable Python plugin
   rust-plugin/           a runnable Rust extension (cdylib, own workspace)
-docs/                    architecture, command line, extensions, Python API,
-                         wire protocol
+docs/                    architecture, command line, dictation, extensions,
+                         Python API, wire protocol
 ```
 
 ## Hooks
@@ -143,6 +161,8 @@ docs/                    architecture, command line, extensions, Python API,
 | ----------------- | ---------------------------- | ------------------------------ |
 | `pipeline.input`  | before the core runs          | `{"text": "..."}`              |
 | `pipeline.output` | after the core produced a result | `{"analysis": {...}}`       |
+| `transcription.raw` | a dictation transcript, before cleanup | `{"text": "...", "audio_seconds": 1.5, "model": "small"}` |
+| `transcription.text` | the same transcript, after cleanup | `{"text": "..."}` |
 
 Extensions run in registration order; each receives the previous one's payload.
 A handler returning `None` leaves the payload untouched.

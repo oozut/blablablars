@@ -15,9 +15,20 @@ use crate::error::{CoreError, ExtensionError};
 pub const HOOK_INPUT: &str = "pipeline.input";
 /// Called with the produced analysis before it is returned.
 pub const HOOK_OUTPUT: &str = "pipeline.output";
+/// Called with `{"text": ...}` right after a model transcribes audio, before
+/// the built-in cleanup. This is where a dictionary or a language fix belongs.
+pub const HOOK_TRANSCRIPT_RAW: &str = "transcription.raw";
+/// Called with `{"text": ...}` after cleanup, before the text is typed. This is
+/// where a rewriter, a formatter or an LLM pass belongs.
+pub const HOOK_TRANSCRIPT_TEXT: &str = "transcription.text";
 
 /// Every hook the core knows about. Extensions may only subscribe to these.
-pub const HOOKS: &[&str] = &[HOOK_INPUT, HOOK_OUTPUT];
+pub const HOOKS: &[&str] = &[
+    HOOK_INPUT,
+    HOOK_OUTPUT,
+    HOOK_TRANSCRIPT_RAW,
+    HOOK_TRANSCRIPT_TEXT,
+];
 
 /// True when `hook` is part of the public hook vocabulary.
 pub fn is_known_hook(hook: &str) -> bool {

@@ -91,13 +91,18 @@ fn version_is_reported_plainly_and_as_json() {
 fn hooks_are_listed() {
     assert_eq!(
         stdout(&run(&["hooks"])),
-        "pipeline.input\npipeline.output\n"
+        "pipeline.input\npipeline.output\ntranscription.raw\ntranscription.text\n"
     );
 
     let listed = json(&run(&["hooks", "--json"]));
     assert_eq!(
         listed,
-        serde_json::json!(["pipeline.input", "pipeline.output"])
+        serde_json::json!([
+            "pipeline.input",
+            "pipeline.output",
+            "transcription.raw",
+            "transcription.text"
+        ])
     );
 }
 

@@ -24,5 +24,9 @@ clap.workspace = true
 serde_json.workspace = true
 blablablars-pythonhost = { path = "../blablablars-pythonhost", optional = true }
 
+[target.'cfg(unix)'.dependencies]
+# `geteuid`, so two users on one machine never share a session socket.
+libc = "0.2"
+
 [lints]
 workspace = true

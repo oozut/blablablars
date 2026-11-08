@@ -94,8 +94,8 @@ becomes the next handler's payload.
 * An exception inside a handler propagates to the caller as `RuntimeError` with
   the original message.
 * Returning a payload that no longer contains a string `text` (for
-  `pipeline.input`) or an `analysis` object (for `pipeline.output`) is an error,
-  because the core cannot continue.
+  `pipeline.input` and the dictation hooks) or an `analysis` object (for
+  `pipeline.output`) is an error, because the core cannot continue.
 
 ## Attaching extensions from Python
 
