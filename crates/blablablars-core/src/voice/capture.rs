@@ -483,9 +483,9 @@ mod tests {
     }
 
     #[test]
-    fn an_auto_capture_prefers_the_pulse_program_and_sets_the_format() {
-        // The sandbox has `arecord` only; whichever is found must carry the
-        // flags that make the output exactly what whisper wants.
+    fn an_auto_capture_sets_the_format_whichever_program_it_picks() {
+        // Whichever recorder this machine has, its output has to be exactly what
+        // whisper wants: 16 kHz mono signed 16-bit little-endian on stdout.
         let (program, argv) = capture_command(&CaptureConfig::default()).unwrap();
         match program.as_str() {
             "parecord" => {
@@ -499,6 +499,14 @@ mod tests {
             "arecord" => {
                 assert!(argv.contains(&"S16_LE".to_string()));
                 assert!(argv.contains(&"raw".to_string()));
+            }
+            // ffmpeg on macOS (`avfoundation`) and Windows (`dshow`) and sox
+            // everywhere ask for the same thing in their own spelling.
+            "ffmpeg" | "sox" => {
+                assert!(argv.windows(2).any(|pair| pair == ["-f", "s16le"]));
+                assert!(argv.windows(2).any(|pair| pair == ["-ar", "16000"]));
+                assert!(argv.windows(2).any(|pair| pair == ["-ac", "1"]));
+                assert_eq!(argv.last().unwrap(), "-", "PCM goes to stdout");
             }
             other => panic!("unexpected capture program {other}"),
         }
@@ -669,6 +677,9 @@ mod tests {
         assert_eq!(byte_budget(-1.0), 0);
     }
 
+    // `/proc` is how this test asks whether a pid is still alive; the Windows
+    // equivalent is a handle, not a file, and `stop` is exercised above anyway.
+    #[cfg(unix)]
     #[test]
     fn forgetting_to_stop_does_not_leak_the_producer() {
         let config = command_capture(&["sh", "-c", "head -c 640 /dev/zero; sleep 30"]);

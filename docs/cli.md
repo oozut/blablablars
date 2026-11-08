@@ -175,5 +175,8 @@ The spec grammar, the flag names in the tables above, the environment variable
 names, the plugin-list format, the config keys named in
 [`dictation.md`](dictation.md) and the JSON shapes of `plugins --json`,
 `plugin list --json`, `models --json` and `engines --json` are the long-term
-interface. New transports arrive as new kinds; new backends arrive as new
-`transcriber.kind` values; existing specs and configs keep loading.
+interface, and so is the platform matrix in
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml): Linux, macOS and
+Windows, on x86-64 and arm64, built and tested on a real machine of each kind. New
+transports arrive as new kinds; new backends arrive as new `transcriber.kind`
+values; existing specs and configs keep loading.

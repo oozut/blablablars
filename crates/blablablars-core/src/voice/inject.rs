@@ -632,8 +632,9 @@ mod tests {
 
     #[test]
     fn a_program_path_is_found_directly() {
-        assert!(find_in_path("/bin/sh").is_some());
-        assert!(find_in_path("sh").is_some());
+        let name = if cfg!(windows) { "cmd" } else { "sh" };
+        let found = find_in_path(name).expect("the shell is on every PATH");
+        assert!(find_in_path(found.to_str().unwrap()).is_some());
         assert!(find_in_path("blablablars-no-such-tool").is_none());
     }
 }

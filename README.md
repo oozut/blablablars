@@ -25,6 +25,23 @@ from Python.
   stdio (a child process, for anything else). The same payload shape is used by
   the CLI output too, so the transports cannot drift.
 
+## Platforms
+
+One binary per platform, and CI builds and tests each on a real machine of that
+kind — these six are the supported set:
+
+| | x86-64 | arm64 |
+| --- | --- | --- |
+| Linux | `x86_64-unknown-linux-gnu` | `aarch64-unknown-linux-gnu` |
+| macOS | `x86_64-apple-darwin` | `aarch64-apple-darwin` |
+| Windows | `x86_64-pc-windows-msvc` | `aarch64-pc-windows-msvc` |
+
+Every push runs formatting, clippy (`-D warnings`), the Rust test suite and the
+Python test suite on all six, plus an end-to-end run of the built binary; a `v*`
+tag attaches the six archives to the release. What each platform needs in order
+to dictate — the capture program, the model files, the way the words are typed
+into the focused window — is in [`docs/dictation.md`](docs/dictation.md).
+
 ## Quick start — Rust
 
 ```bash
@@ -176,11 +193,16 @@ A handler returning `None` leaves the payload untouched.
 make test          # cargo test + cargo fmt --check + cargo clippy -D warnings
 make python-test   # unittest suite against the built extension
 make example       # build the example Rust extension (a real cdylib)
+make cross         # type-check the other five platforms from here
 ```
 
 The Rust tests build `examples/rust-plugin` on demand and load it in-process;
 the CLI tests skip the embedded-Python cases until `maturin develop` has produced
-`python/blablablars/_native*.so`.
+`python/blablablars/_native*.so` (`.pyd` on Windows).
+
+`make test` tests the machine you are on. CI tests all six platforms in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) — that file's matrix *is*
+the list of supported platforms, so a target that is not in it is not supported.
 
 ## License
 

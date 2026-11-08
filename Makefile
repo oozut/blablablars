@@ -14,9 +14,18 @@ EXAMPLE_DIR := target/plugin-fixture
 EXAMPLE_NAME := blablablars_example_rust_plugin
 SOEXT := $(shell uname -s | grep -qi darwin && echo dylib || echo so)
 
+# Every platform CI builds and tests. Only the machine you are on can *run* its
+# own tests; this target type-checks all of them, which is what catches a `cfg`
+# mistake before a runner does.
+TARGETS := x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+           x86_64-apple-darwin aarch64-apple-darwin \
+           x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+# pyo3 needs to be told a version when the interpreter cannot be run.
+PYO3_CROSS_PYTHON_VERSION ?= 3.12
+
 .DEFAULT_GOAL := help
 
-.PHONY: help build release test lint fmt python-venv python-develop python-test example demo demo-inprocess clean
+.PHONY: help build release test lint fmt python-venv python-develop python-test example demo demo-inprocess cross clean
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -38,6 +47,14 @@ fmt: ## Format Rust sources
 
 lint: ## Clippy only
 	$(CARGO) clippy $(RUST_PACKAGES) --all-targets -- -D warnings
+
+cross: ## Type-check every supported platform (needs their rust targets installed)
+	@for target in $(TARGETS); do \
+		echo "== $$target"; \
+		PYO3_CROSS_PYTHON_VERSION=$(PYO3_CROSS_PYTHON_VERSION) \
+			$(CARGO) clippy $(RUST_PACKAGES) --all-targets --target $$target -- -D warnings \
+			|| exit 1; \
+	done
 
 python-venv: ## Create the local virtualenv
 	$(PYTHON) -m venv $(VENV)

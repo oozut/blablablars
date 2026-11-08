@@ -390,3 +390,11 @@ Windows.
 The XDG variables win over the platform defaults on every system, so a sandbox or
 a test can point everything somewhere harmless. `capture.kind: command` with your
 own `argv` covers a device that `auto` picks badly, on any platform.
+
+All three platforms are built and tested in CI, on x86-64 and arm64 both: the
+matrix in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) is the
+supported set, and it runs the whole Rust suite on each of those machines rather
+than only cross-compiling. What has *not* been exercised there is a real
+microphone and a real focused window — the tests record from a WAV or a shell
+command — so treat the capture and typing rows above as the configuration each
+desktop needs, not as a claim that a specific desktop's tool was run.

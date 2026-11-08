@@ -31,6 +31,7 @@ build/
 dist/
 *.egg-info/
 python/blablablars/_native*.so
+python/blablablars/_native*.pyd
 .pytest_cache/
 
 # The example extension is its own workspace; tests build it into target/plugin-fixture.

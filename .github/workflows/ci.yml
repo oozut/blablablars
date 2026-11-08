@@ -1,42 +1,127 @@
 name: CI
 
+# Everything the binary promises — Linux, macOS and Windows, on both x86-64 and
+# arm64 — is built and tested here, on a real machine of each kind. The matrix is
+# the list of platforms that are supported: if a target is not here, it is not
+# supported.
 on:
   push:
     branches: ["**"]
+    tags: ["v*"]
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
-  rust:
-    name: Rust (${{ matrix.toolchain }})
+  formatting:
+    name: Formatting
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      # Formatting is the same everywhere, so it runs once.
+      - run: cargo fmt --all --check
+
+  build:
+    name: Build and test (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [stable]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: blablablars-linux-x86_64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: blablablars-linux-aarch64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: blablablars-windows-x86_64
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            asset: blablablars-windows-aarch64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            asset: blablablars-macos-x86_64
+          - os: macos-15
+            target: aarch64-apple-darwin
+            asset: blablablars-macos-aarch64
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ matrix.toolchain }}
-          components: rustfmt, clippy
+          targets: ${{ matrix.target }}
+          components: clippy
       - uses: Swatinem/rust-cache@v2
-      # The CLI embeds CPython by default, so the runner needs the headers and
-      # libpython at link time.
-      - name: Python headers
+        with:
+          key: ${{ matrix.target }}
+      # The CLI embeds CPython, so every runner needs an interpreter with headers
+      # and a linkable libpython.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python headers (Linux)
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y python3-dev
-      - name: Formatting
-        run: cargo fmt --all --check
+      # The dictation tests drive their fixtures through a POSIX shell, so the
+      # Windows runners need one on PATH — the image ships Git for Windows.
+      - name: A POSIX shell on PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bash = "C:\Program Files\Git\usr\bin"
+          if (Test-Path $bash) { $bash | Out-File -Append -Encoding utf8 $env:GITHUB_PATH }
       - name: Clippy
-        run: cargo clippy --workspace --exclude blablablars-python --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
         run: cargo test --workspace --exclude blablablars-python
+      - name: Release build
+        # `--target` even on a native runner, so the artefact paths below are one
+        # shape everywhere.
+        run: cargo build --release --workspace --exclude blablablars-python --target ${{ matrix.target }}
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          tar czf "dist/${{ matrix.asset }}.tar.gz" -C target/${{ matrix.target }}/release blablablars
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path "target/${{ matrix.target }}/release/blablablars.exe" `
+            -DestinationPath "dist/${{ matrix.asset }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/*
+          if-no-files-found: error
 
   python:
-    name: Python bindings
-    runs-on: ubuntu-latest
+    name: Python bindings (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -45,35 +130,122 @@ jobs:
           python-version: "3.12"
       - uses: Swatinem/rust-cache@v2
         with:
-          key: python
+          key: python-${{ matrix.target }}
+      # The dictation fixture below records through a POSIX shell; the same
+      # Git-for-Windows `usr\bin` that the build job uses supplies it.
+      - name: A POSIX shell on PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          shell_dir="C:/Program Files/Git/usr/bin"
+          if [ -d "$shell_dir" ]; then cygpath -w "$shell_dir" >> "$GITHUB_PATH"; fi
+      # `maturin develop` needs a virtualenv — on every platform, and on Windows
+      # finding its `Scripts` directory is what makes `python` the venv python.
+      - name: A virtualenv for the bindings
+        shell: bash
+        run: |
+          python -m venv .venv
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            echo "VIRTUAL_ENV=$(cygpath -w "$PWD/.venv")" >> "$GITHUB_ENV"
+            echo "$(cygpath -w "$PWD/.venv/Scripts")" >> "$GITHUB_PATH"
+          else
+            echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+            echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          fi
       - name: Install maturin
-        run: pip install "maturin>=1.16,<2"
+        run: python -m pip install --upgrade "maturin>=1.16,<2"
       - name: Build and install the extension
         working-directory: python
         run: maturin develop --release
       - name: Build the example Rust extension
         run: cargo build --manifest-path examples/rust-plugin/Cargo.toml --target-dir target/plugin-fixture
+      # A library suffix and a `.exe` are the only platform differences in the
+      # end-to-end checks below, so they are worked out once.
+      - name: Where the pieces are
+        shell: bash
+        run: |
+          case "${{ runner.os }}" in
+            Windows) lib=target/plugin-fixture/debug/blablablars_example_rust_plugin.dll; bin=target/release/blablablars.exe ;;
+            macOS)   lib=target/plugin-fixture/debug/libblablablars_example_rust_plugin.dylib; bin=target/release/blablablars ;;
+            *)       lib=target/plugin-fixture/debug/libblablablars_example_rust_plugin.so; bin=target/release/blablablars ;;
+          esac
+          echo "PLUGIN=$lib" >> "$GITHUB_ENV"
+          echo "BLABLABLARS=$bin" >> "$GITHUB_ENV"
       - name: Tests
         working-directory: python
-        run: python -m unittest discover -s tests -v
+        run: python -m unittest discover -s tests -t tests -v
       - name: End-to-end with the Rust binary
         run: |
           cargo build --release -p blablablars-cli
           echo "--- child process"
-          target/release/blablablars run "hello brave world" --json \
+          "$BLABLABLARS" run "hello brave world" --json \
             --plugin "python -m blablablars.runtime examples/python/hello_plugin.py"
           echo "--- in process (Rust cdylib + embedded Python)"
-          target/release/blablablars run "hello brave world" --json \
-            --plugin rust:target/plugin-fixture/debug/libblablablars_example_rust_plugin.so \
+          "$BLABLABLARS" run "hello brave world" --json \
+            --plugin "rust:$PLUGIN" \
             --python-path python \
             --plugin python:examples/python/hello_plugin.py
+        shell: bash
       - name: The plugin list is the long-term attachment path
+        shell: bash
         run: |
           config="$RUNNER_TEMP/blablablars-plugins"
-          target/release/blablablars plugin add \
-            rust:target/plugin-fixture/debug/libblablablars_example_rust_plugin.so \
-            --config "$config"
-          target/release/blablablars plugin list --config "$config"
-          target/release/blablablars run "hello brave world" --json --plugin-config "$config"
-      - name: CLI tests against the built package
-        run: cargo test -p blablablars-cli
+          rm -f "$config"
+          "$BLABLABLARS" plugin add "rust:$PLUGIN" --config "$config"
+          "$BLABLABLARS" plugin list --config "$config"
+          "$BLABLABLARS" run "hello brave world" --json --plugin-config "$config"
+      - name: Dictation, without a microphone
+        shell: bash
+        run: |
+          # A WAV on disk and a one-line backend: the whole chain — transcribe,
+          # clean up, deliver — runs on every platform here.
+          cat > "$RUNNER_TEMP/voice.yml" <<'YAML'
+          language: en
+          capture:
+            kind: command
+            argv: ["sh", "-c", "head -c 6400 /dev/zero; sleep 20"]
+          models:
+            default: tiny.en
+          transcriber:
+            kind: command
+            argv: ["printf", 'um, hello   there']
+          cleanup: true
+          output:
+            kind: stdout
+          YAML
+          python - "$RUNNER_TEMP/take.wav" <<'PY'
+          import sys, wave
+
+          with wave.open(sys.argv[1], "wb") as wav:
+              wav.setnchannels(1)
+              wav.setsampwidth(2)
+              wav.setframerate(16_000)
+              wav.writeframes(b"\x64\x00" * 16_000)
+          PY
+          echo "--- what this machine can run"
+          "$BLABLABLARS" engines --config "$RUNNER_TEMP/voice.yml"
+          echo "--- a WAV, in and out"
+          out=$("$BLABLABLARS" dictate --config "$RUNNER_TEMP/voice.yml" \
+            --input "$RUNNER_TEMP/take.wav" --print)
+          echo "typed: $out"
+          [ "$out" = "Hello there." ] || {
+            echo "the transcript was not cleaned up"; exit 1; }
+
+  release:
+    name: Attach the binaries to the release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: List what will be attached
+        run: ls -l dist
+      - name: Attach
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/* --generate-notes --verify-tag || gh release upload "${{ github.ref_name }}" dist/* --clobber

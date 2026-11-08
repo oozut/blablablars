@@ -42,14 +42,22 @@ pub const fn desktop() -> Desktop {
 
 /// A platform directory, without the `blablablars` component.
 ///
-/// `override_var` is the environment variable that wins when set, which is what
-/// makes `XDG_*` work and what the tests use to stay out of the user's files.
-fn directory(
+/// The order is: the `XDG_*` variable, then the variable the platform itself
+/// documents, then a folder under the home directory. `XDG_*` wins on every
+/// system — Linux keeps it as its native convention, and on macOS and Windows it
+/// is what lets a sandbox, a test or a user who keeps everything in one folder
+/// redirect the whole application.
+fn platform_dir(
     get: &dyn Fn(&str) -> Option<PathBuf>,
-    override_var: &str,
+    xdg_var: &str,
+    native_var: Option<&str>,
     home: &[&str],
 ) -> Option<PathBuf> {
-    if let Some(dir) = get(override_var).filter(|dir| !dir.as_os_str().is_empty()) {
+    let set = |name: &str| get(name).filter(|dir| !dir.as_os_str().is_empty());
+    if let Some(dir) = set(xdg_var) {
+        return Some(dir);
+    }
+    if let Some(dir) = native_var.and_then(set) {
         return Some(dir);
     }
     let base = home_dir_from(get)?;
@@ -78,13 +86,16 @@ pub fn config_dir() -> Option<PathBuf> {
 
 fn config_dir_from(get: &dyn Fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
     let base = if cfg!(windows) {
-        directory(get, "APPDATA", &[])
+        platform_dir(get, "XDG_CONFIG_HOME", Some("APPDATA"), &[])
     } else if cfg!(target_os = "macos") {
-        directory(get, "XDG_CONFIG_HOME", &["Library", "Application Support"])
-    } else if get("XDG_CONFIG_HOME").is_some() {
-        directory(get, "XDG_CONFIG_HOME", &[])
+        platform_dir(
+            get,
+            "XDG_CONFIG_HOME",
+            None,
+            &["Library", "Application Support"],
+        )
     } else {
-        directory(get, "XDG_CONFIG_HOME", &[".config"])
+        platform_dir(get, "XDG_CONFIG_HOME", None, &[".config"])
     };
     base.map(|dir| dir.join("blablablars"))
 }
@@ -97,13 +108,16 @@ pub fn data_dir() -> Option<PathBuf> {
 
 fn data_dir_from(get: &dyn Fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
     let base = if cfg!(windows) {
-        directory(get, "LOCALAPPDATA", &[])
+        platform_dir(get, "XDG_DATA_HOME", Some("LOCALAPPDATA"), &[])
     } else if cfg!(target_os = "macos") {
-        directory(get, "XDG_DATA_HOME", &["Library", "Application Support"])
-    } else if get("XDG_DATA_HOME").is_some() {
-        directory(get, "XDG_DATA_HOME", &[])
+        platform_dir(
+            get,
+            "XDG_DATA_HOME",
+            None,
+            &["Library", "Application Support"],
+        )
     } else {
-        directory(get, "XDG_DATA_HOME", &[".local", "share"])
+        platform_dir(get, "XDG_DATA_HOME", None, &[".local", "share"])
     };
     base.map(|dir| dir.join("blablablars"))
 }
@@ -116,13 +130,11 @@ pub fn state_dir() -> Option<PathBuf> {
 
 fn state_dir_from(get: &dyn Fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
     let base = if cfg!(windows) {
-        directory(get, "LOCALAPPDATA", &[])
+        platform_dir(get, "XDG_STATE_HOME", Some("LOCALAPPDATA"), &[])
     } else if cfg!(target_os = "macos") {
-        directory(get, "XDG_STATE_HOME", &["Library", "Logs"])
-    } else if get("XDG_STATE_HOME").is_some() {
-        directory(get, "XDG_STATE_HOME", &[])
+        platform_dir(get, "XDG_STATE_HOME", None, &["Library", "Logs"])
     } else {
-        directory(get, "XDG_STATE_HOME", &[".local", "state"])
+        platform_dir(get, "XDG_STATE_HOME", None, &[".local", "state"])
     };
     base.map(|dir| dir.join("blablablars"))
 }
@@ -229,28 +241,107 @@ mod tests {
         }
     }
 
+    /// A home directory that is absolute *on the platform being compiled for*,
+    /// which is the point of the paths below: `/home/ana` has no drive letter,
+    /// so it is not absolute on Windows and would make the test lie.
+    fn home_path() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(r"C:\Users\ana")
+        } else {
+            PathBuf::from("/home/ana")
+        }
+    }
+
+    fn native_profile() -> impl Fn(&str) -> Option<PathBuf> {
+        let home = home_path();
+        let appdata = home.join("AppData").join("Roaming");
+        let localappdata = home.join("AppData").join("Local");
+        let entries: Vec<(String, PathBuf)> = vec![
+            ("HOME".to_string(), home.clone()),
+            ("USERPROFILE".to_string(), home),
+            ("APPDATA".to_string(), appdata),
+            ("LOCALAPPDATA".to_string(), localappdata),
+        ];
+        move |key| {
+            entries
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+        }
+    }
+
     #[test]
     fn every_platform_has_a_config_directory() {
-        let home = lookup(&[("HOME", "/home/ana")]);
-        let config = config_dir_from(&home).unwrap();
+        let get = native_profile();
+        let config = config_dir_from(&get).unwrap();
         assert!(config.ends_with("blablablars"), "{}", config.display());
         assert!(config.is_absolute(), "{}", config.display());
 
-        // Linux keeps the XDG layout; the others use their own convention.
-        if cfg!(all(unix, not(target_os = "macos"))) {
-            assert_eq!(config, PathBuf::from("/home/ana/.config/blablablars"));
+        let home = home_path();
+        if cfg!(windows) {
+            // Windows documents `%APPDATA%` for configuration and
+            // `%LOCALAPPDATA%` for everything the machine owns.
+            assert_eq!(config, home.join("AppData/Roaming/blablablars"));
             assert_eq!(
-                data_dir_from(&home).unwrap(),
-                PathBuf::from("/home/ana/.local/share/blablablars")
+                data_dir_from(&get).unwrap(),
+                home.join("AppData/Local/blablablars")
             );
             assert_eq!(
-                state_dir_from(&home).unwrap(),
-                PathBuf::from("/home/ana/.local/state/blablablars")
+                state_dir_from(&get).unwrap(),
+                home.join("AppData/Local/blablablars")
+            );
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(config, home.join("Library/Application Support/blablablars"));
+            assert_eq!(
+                data_dir_from(&get).unwrap(),
+                home.join("Library/Application Support/blablablars")
+            );
+            assert_eq!(
+                state_dir_from(&get).unwrap(),
+                home.join("Library/Logs/blablablars")
+            );
+        } else {
+            assert_eq!(config, home.join(".config/blablablars"));
+            assert_eq!(
+                data_dir_from(&get).unwrap(),
+                home.join(".local/share/blablablars")
+            );
+            assert_eq!(
+                state_dir_from(&get).unwrap(),
+                home.join(".local/state/blablablars")
             );
         }
-        if cfg!(target_os = "macos") {
-            assert!(config.ends_with("Library/Application Support/blablablars"));
-        }
+    }
+
+    #[test]
+    fn the_xdg_variables_are_the_way_out_on_every_platform() {
+        // A sandbox sets these; that has to work on macOS and Windows too, or
+        // every test would write into the developer's real profile.
+        let get = lookup(&[
+            ("XDG_CONFIG_HOME", "/scratch/conf"),
+            ("XDG_DATA_HOME", "/scratch/data"),
+            ("XDG_STATE_HOME", "/scratch/state"),
+            ("XDG_RUNTIME_DIR", "/scratch/run"),
+            ("APPDATA", "/users/ana/AppData/Roaming"),
+            ("LOCALAPPDATA", "/users/ana/AppData/Local"),
+            ("HOME", "/users/ana"),
+        ]);
+        assert_eq!(
+            config_dir_from(&get).unwrap(),
+            PathBuf::from("/scratch/conf/blablablars")
+        );
+        assert_eq!(
+            data_dir_from(&get).unwrap(),
+            PathBuf::from("/scratch/data/blablablars")
+        );
+        assert_eq!(
+            state_dir_from(&get).unwrap(),
+            PathBuf::from("/scratch/state/blablablars")
+        );
+        assert_eq!(
+            runtime_dir_from(&get).unwrap(),
+            PathBuf::from("/scratch/run/blablablars")
+        );
     }
 
     #[test]
@@ -332,10 +423,18 @@ mod tests {
 
     #[test]
     fn a_program_is_found_on_the_path_like_the_shell_would() {
-        let sh = find_program("sh").unwrap();
-        assert!(sh.is_file(), "{}", sh.display());
-        assert!(find_program("/bin/sh").unwrap().is_file());
+        // `cmd` on Windows, `sh` everywhere else: one program that is always
+        // there, so the test says the same thing on all three systems.
+        let name = if cfg!(windows) { "cmd" } else { "sh" };
+        let found = find_program(name).expect("the shell is on every PATH");
+        assert!(found.is_file(), "{}", found.display());
+
+        // A path is used as it is, with no search — and a bare name is not a
+        // path, so neither `..` nor a directory can smuggle one in.
+        let absolute = found.to_str().unwrap();
+        assert!(find_program(absolute).unwrap().is_file());
         assert!(find_program("blablablars-no-such-program").is_none());
         assert!(find_program("").is_none());
+        assert!(find_program("/no/such/directory/sh").is_none());
     }
 }

@@ -78,7 +78,7 @@ transcriber:
 cleanup: true
 output:
   kind: command
-  argv: ["sh", "-c", "printf '%s' \"$1\" >> \"$0\"", "{typed}", "{{text}}"]
+  argv: ["sh", "-c", "printf '%s' \"$1\" >> \"$0\"", '{typed}', "{{text}}"]
 "#,
             typed = typed.display()
         );
@@ -101,7 +101,7 @@ models:
 cleanup: true
 output:
   kind: command
-  argv: ["sh", "-c", "printf '%s' \"$1\" >> \"$0\"", "{typed}", "{{text}}"]
+  argv: ["sh", "-c", "printf '%s' \"$1\" >> \"$0\"", '{typed}', "{{text}}"]
 {extra}"#,
             typed = typed.display()
         );

@@ -609,9 +609,11 @@ mod tests {
 
     #[test]
     fn the_home_alias_is_expanded_in_the_model_directory() {
-        let home = std::env::var("HOME").unwrap();
+        let Some(home) = platform::home_dir() else {
+            return;
+        };
         let config = VoiceConfig::from_yaml("models:\n  directory: ~/m\n").unwrap();
-        assert_eq!(config.models.directory, PathBuf::from(home).join("m"));
+        assert_eq!(config.models.directory, home.join("m"));
 
         assert_eq!(
             expand_home(Path::new("/absolute")),
