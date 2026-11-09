@@ -43,6 +43,12 @@ impl Sandbox {
 
     /// Run the binary in the sandbox with a clean environment.
     fn run(&self, arguments: &[&str]) -> Output {
+        self.command(arguments).output().unwrap()
+    }
+
+    /// The binary, pointed at the sandbox and stripped of anything that could
+    /// reach the developer's own config, plugins or session.
+    fn command(&self, arguments: &[&str]) -> Command {
         let mut command = binary();
         command
             .args(arguments)
@@ -57,7 +63,31 @@ impl Sandbox {
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY")
             .stdin(std::process::Stdio::null());
-        command.output().unwrap()
+        command
+    }
+
+    /// Run the binary and wait for it to exit — not for the end of its output.
+    ///
+    /// The shortcut starts a recorder that outlives the press which started it.
+    /// On Windows that recorder inherits the press's standard handles (Rust
+    /// hands the child every inheritable handle, not the ones it asked for), so
+    /// reading a pipe until end-of-file would wait for the recorder — which only
+    /// stops on the *next* press, and the test would wait for ever. The output
+    /// goes to a file instead, which is also what a real shortcut does.
+    fn run_and_collect(&self, arguments: &[&str]) -> (std::process::ExitStatus, String) {
+        let path = self.path("press.log");
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let status = self
+            .command(arguments)
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .status()
+            .unwrap();
+        (status, std::fs::read_to_string(&path).unwrap_or_default())
     }
 
     /// Write a config whose transcriber is `printf`, and whose output appends to
@@ -228,12 +258,12 @@ fn the_shortcut_streams_when_it_is_asked_for() {
         "1500",
     ];
 
-    let start = sandbox.run(&flags);
-    assert!(start.status.success(), "{}", stderr(&start));
+    let (start, report) = sandbox.run_and_collect(&flags);
+    assert!(start.success(), "{report}");
     std::thread::sleep(Duration::from_millis(400));
 
-    let stop = sandbox.run(&flags);
-    assert!(stop.status.success(), "{}", stderr(&stop));
+    let (stop, report) = sandbox.run_and_collect(&flags);
+    assert!(stop.success(), "{report}");
 
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline && !typed.exists() {

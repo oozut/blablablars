@@ -549,6 +549,11 @@ fn spawn_recorder(args: &DictateArgs) -> Result<(), CoreError> {
         command.arg("--stream-window").arg(window.to_string());
     }
     command.args(args.attach.to_flags());
+    // The recorder is meant to outlive this press, so it gets no handles from
+    // it: on Windows a child inherits every inheritable handle of its parent
+    // (not just the ones named here), which keeps a caller's pipe open until the
+    // recording is stopped. Nothing safe can say "inherit only these", so the
+    // tests redirect to a file instead of reading a pipe to end-of-file.
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::null());
 

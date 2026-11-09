@@ -69,6 +69,11 @@ The session is a loopback TCP port noted down in a small file in the runtime
 directory, so a crash cannot leave a stale pid file behind, and the same code
 works on all three systems — a Unix domain socket would not.
 
+One Windows detail: a detached recorder inherits whatever standard handles the
+process that started it had, so a script that pipes `blablablars dictate
+--toggle` and waits for end-of-file waits until the recording is stopped. A
+shortcut has no pipes and does not care; a script should redirect to a file.
+
 ## The config file
 
 `$XDG_CONFIG_HOME/blablablars/config.yml` (`%APPDATA%\blablablars\config.yml` on
