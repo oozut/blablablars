@@ -509,14 +509,18 @@ mod tests {
     fn a_command_injector_substitutes_the_text_and_appends_when_absent() {
         let path = std::env::temp_dir().join(format!("blb-inject-{}", std::process::id()));
         let _ = std::fs::remove_file(&path);
+        // The path is an argument, never part of the script: a Windows path in a
+        // shell word is a pile of escapes, and this test is not about quoting.
+        let destination = path.display().to_string();
 
         CommandInjector {
             argv: vec![
                 "sh".to_string(),
                 "-c".to_string(),
-                format!("printf '%s' \"$1\" >> {}", path.display()),
+                "printf '%s' \"$1\" >> \"$2\"".to_string(),
                 "sh".to_string(),
                 "{text}".to_string(),
+                destination.clone(),
             ],
         }
         .inject("hello, world")
@@ -528,8 +532,9 @@ mod tests {
             argv: vec![
                 "sh".to_string(),
                 "-c".to_string(),
-                format!("printf '%s' \"$1\" >> {}", path.display()),
+                "printf '%s' \"$2\" >> \"$1\"".to_string(),
                 "sh".to_string(),
+                destination,
             ],
         }
         .inject("!")
@@ -611,12 +616,17 @@ mod tests {
             copy: vec![
                 "sh".into(),
                 "-c".into(),
-                format!("cat > {}", clipboard.display()),
+                "cat > \"$1\"".into(),
+                "sh".into(),
+                clipboard.display().to_string(),
             ],
             paste: vec![
                 "sh".into(),
                 "-c".into(),
-                format!("cp {} {}", clipboard.display(), pasted.display()),
+                "cp \"$1\" \"$2\"".into(),
+                "sh".into(),
+                clipboard.display().to_string(),
+                pasted.display().to_string(),
             ],
         };
         injector.inject("hallo wörld").unwrap();
