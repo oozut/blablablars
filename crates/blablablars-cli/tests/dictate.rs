@@ -243,7 +243,10 @@ fn the_shortcut_streams_when_it_is_asked_for() {
 
     // The detached recorder got the streaming flags too. Its own report goes to
     // the log, because the press that stopped it has already let go.
-    let log = sandbox.path("state/blablablars/dictate.log");
+    let log = sandbox
+        .path("state")
+        .join("blablablars")
+        .join("dictate.log");
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut report = String::new();
     while Instant::now() < deadline {
@@ -397,8 +400,9 @@ fn config_path_is_the_documented_location() {
     assert_eq!(
         stdout(&output).trim(),
         sandbox
-            .root
-            .join("config/blablablars/config.yml")
+            .path("config")
+            .join("blablablars")
+            .join("config.yml")
             .display()
             .to_string()
     );
@@ -407,7 +411,7 @@ fn config_path_is_the_documented_location() {
 #[test]
 fn models_lists_what_is_in_the_directory_and_marks_the_default() {
     let sandbox = Sandbox::new("models");
-    let directory = sandbox.path("data/blablablars/models");
+    let directory = sandbox.path("data").join("blablablars").join("models");
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(directory.join("ggml-small.bin"), vec![0u8; 1024]).unwrap();
     std::fs::write(
@@ -458,7 +462,7 @@ fn an_empty_model_directory_says_where_to_get_one() {
 #[test]
 fn a_whisper_backend_without_a_model_says_so_and_offers_a_way_out() {
     let sandbox = Sandbox::new("nomodel");
-    std::fs::create_dir_all(sandbox.path("data/blablablars/models")).unwrap();
+    std::fs::create_dir_all(sandbox.path("data").join("blablablars").join("models")).unwrap();
     let wav = write_wav(&sandbox, 1.0);
     let config = sandbox.path("whisper.yml");
     std::fs::write(
@@ -540,7 +544,7 @@ stream:
   enabled: true
   step_ms: 200
   window_ms: 1000
-  command: ["sh", "{}"]
+  command: ["sh", '{}']
 "#,
         engine.display()
     ));
