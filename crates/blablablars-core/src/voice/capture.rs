@@ -486,7 +486,11 @@ mod tests {
     fn an_auto_capture_sets_the_format_whichever_program_it_picks() {
         // Whichever recorder this machine has, its output has to be exactly what
         // whisper wants: 16 kHz mono signed 16-bit little-endian on stdout.
-        let (program, argv) = capture_command(&CaptureConfig::default()).unwrap();
+        // A bare macOS runner has neither ffmpeg nor SoX; the "no recorder at
+        // all" case is the next test's job, so there is nothing to check here.
+        let Ok((program, argv)) = capture_command(&CaptureConfig::default()) else {
+            return;
+        };
         match program.as_str() {
             "parecord" => {
                 assert!(argv.contains(&"--raw".to_string()));

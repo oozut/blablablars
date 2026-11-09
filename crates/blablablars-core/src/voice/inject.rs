@@ -234,16 +234,26 @@ impl Injector for PasteInjector {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| CoreError::Voice(format!("cannot run `{copy}`: {error}")))?;
+        // A copy program that fails can exit before it has read the text, and
+        // then the write ends in a broken pipe. That is the same failure the
+        // exit status reports a moment later, so it must not escape as a bare
+        // "Broken pipe (os error 32)" that says nothing about the clipboard.
+        let mut unread = false;
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(text.as_bytes())?;
+            unread = stdin.write_all(text.as_bytes()).is_err();
         }
         let output = child
             .wait_with_output()
             .map_err(|error| CoreError::Voice(format!("`{copy}` failed: {error}")))?;
-        if !output.status.success() {
+        if !output.status.success() || unread {
+            let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let detail = if detail.is_empty() {
+                format!("`{}` did not read the text", output.status)
+            } else {
+                detail
+            };
             return Err(CoreError::Voice(format!(
-                "`{copy}` could not put the text on the clipboard: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
+                "`{copy}` could not put the text on the clipboard: {detail}"
             )));
         }
 
