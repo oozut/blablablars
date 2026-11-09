@@ -25,6 +25,13 @@ It runs on Linux, macOS and Windows. Nothing is linked against an audio library:
 capture is always a child process writing PCM to stdout, and typing is always a
 program or a clipboard, so the same binary works wherever those exist.
 
+Stopping is the one place where the three differ. A recorder is usually a shell
+that spawned the real program, and the audio only ends when the last writer of
+the pipe is gone, so on Unix the recorder starts in its own process group and one
+`SIGTERM` goes to the group, while on Windows the tree is closed with
+`taskkill /T /F`. Stopping just the shell would leave `parecord`, `ffmpeg` or a
+`sleep` holding the pipe open, and `stop` would wait for an end that never comes.
+
 ## Quick start
 
 ```bash

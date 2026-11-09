@@ -176,7 +176,6 @@ impl Recording {
     }
 
     fn terminate(&mut self) -> Result<(), CoreError> {
-        #[cfg(unix)]
         signal::terminate(&self.child);
 
         // Wait for a clean exit, then insist.
@@ -437,7 +436,13 @@ pub fn byte_budget(max_seconds: f64) -> usize {
     (max_seconds.max(0.0) * f64::from(WHISPER_RATE) * 2.0) as usize
 }
 
-/// Asking a child to stop politely, so it flushes what it already has.
+/// Stopping the recorder *and whatever it started*, so the pipe really closes.
+///
+/// The reader thread only ends when every writer of the pipe is gone, and a
+/// recorder is usually a shell that spawned the real program: stopping just the
+/// shell would leave `parecord`, `ffmpeg` or a `sleep` holding the pipe open for
+/// ever. On Unix the recorder gets its own process group, so one signal reaches
+/// all of it; Windows has no such thing, and `taskkill /T` is its equivalent.
 #[cfg(unix)]
 mod signal {
     #![allow(unsafe_code)]
@@ -456,6 +461,28 @@ mod signal {
         unsafe {
             libc::kill(group, libc::SIGTERM);
         }
+    }
+}
+
+#[cfg(windows)]
+mod signal {
+    use std::os::windows::process::CommandExt as _;
+    use std::process::{Child, Command, Stdio};
+
+    /// `CREATE_NO_WINDOW`: the user pressed a shortcut, not "open a console".
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    /// `/T` takes the whole tree with it — the recorder's own children included
+    /// — and `/F` is the closest thing to a SIGKILL. A failure (the recorder
+    /// already exited) is ignored: `stop` then falls back to `Child::kill`.
+    pub fn terminate(child: &Child) {
+        let _ = Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &child.id().to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
     }
 }
 
