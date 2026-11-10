@@ -74,6 +74,87 @@ process that started it had, so a script that pipes `blablablars dictate
 --toggle` and waits for end-of-file waits until the recording is stopped. A
 shortcut has no pipes and does not care; a script should redirect to a file.
 
+## From key press to text
+
+The shortcut is one command run twice. The first press leaves a recorder behind
+and returns; the second press finds it through the session file and asks it to
+finish.
+
+```mermaid
+flowchart TD
+    key["keyboard shortcut<br/><code>blablablars dictate --toggle</code>"]
+    key --> session{"is a session<br/>listening?"}
+
+    session -->|"no — first press"| spawn["spawn <code>dictate --record-child</code><br/>stdin and stdout null, stderr to <code>dictate.log</code>"]
+    spawn --> listen["TcpListener on 127.0.0.1:0"]
+    listen --> note["write <code>dictate-&lt;user&gt;.json</code><br/>{ port, token } in the runtime directory"]
+    note --> capture["Recording::start(capture)<br/>a child process writes 16 kHz mono s16 PCM"]
+    capture --> wait["wait: answer the socket,<br/>pump the streaming steps"]
+    wait -.->|"next press"| session
+
+    session -->|"yes — second press"| stop["connect, write <code>stop &lt;token&gt;</code>"]
+    stop --> reply["recorder answers <code>stopping</code><br/>and stops listening"]
+    reply --> terminate["Recording::stop()<br/>SIGTERM to the process group,<br/>taskkill /T on Windows"]
+    terminate --> audio["the whole recording, as one <code>Audio</code>"]
+    audio --> transcribe["transcribe, clean up, type"]
+    transcribe --> cleanup["session file removed"]
+```
+
+What happens to that audio is the part that changes with the config, not with the
+shortcut:
+
+```mermaid
+flowchart LR
+    mic["microphone"] --> recorder["arecord / pw-record /<br/>ffmpeg / sox<br/>16 kHz mono s16le on stdout"]
+    recorder --> audio["Audio<br/>16 kHz mono 16-bit"]
+
+    audio --> kind{"transcriber.kind"}
+    kind -->|"whisper"| whisper["whisper-cli / whisper-server"]
+    kind -->|"parakeet"| parakeet["parakeet-cli"]
+    kind -->|"sherpa-onnx"| sherpa["sherpa-onnx-offline"]
+    kind -->|"command"| command["any program that<br/>prints a transcript"]
+
+    whisper --> raw["raw text"]
+    parakeet --> raw
+    sherpa --> raw
+    command --> raw
+
+    raw --> hookraw["hook <code>transcription.raw</code>"]
+    hookraw --> clean["cleanup<br/>spoken phrases, [noise], spacing"]
+    clean --> hooktext["hook <code>transcription.text</code>"]
+    hooktext --> deliver["output.kind<br/>paste, wtype, xdotool,<br/>stdout or a command"]
+    deliver --> field["the focused text field"]
+```
+
+With `stream.enabled: true` the same pieces run in a loop while the recording is
+open, and the last step settles what is left:
+
+```mermaid
+sequenceDiagram
+    participant K as shortcut
+    participant R as recorder
+    participant C as capture
+    participant E as streaming engine
+    participant T as focused field
+
+    K->>R: first press (spawn)
+    R->>C: start
+    loop every stream.step_ms
+        R->>C: drain() — the audio heard since the last step
+        R->>E: step(chunk)
+        E-->>R: hypothesis over the whole window
+        Note over R: polish, then type only the new<br/>longest common prefix
+        R->>T: inject_chunk(delta)
+        R->>E: note_committed(...)
+    end
+    K->>R: second press (stop)
+    R->>C: stop
+    C-->>R: the whole recording
+    R->>E: finish(whole)
+    E-->>R: final hypothesis
+    R->>T: inject_chunk(the words still owed)
+```
+
 ## The config file
 
 `$XDG_CONFIG_HOME/blablablars/config.yml` (`%APPDATA%\blablablars\config.yml` on
