@@ -573,6 +573,23 @@ mod tests {
         let _ = std::fs::remove_file(raw);
     }
 
+    /// Drain until `wanted` samples have arrived in total.
+    ///
+    /// The producers below are shell scripts, so how long a sample takes to
+    /// appear is up to the machine; waiting for the samples themselves keeps the
+    /// test about draining instead of about how loaded the runner is.
+    fn drain_until(recording: &mut Recording, wanted: usize) -> Vec<i16> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut samples = Vec::new();
+        while samples.len() < wanted && Instant::now() < deadline {
+            samples.extend(recording.drain().samples());
+            if samples.len() < wanted {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        samples
+    }
+
     #[test]
     fn a_streaming_session_can_look_at_the_audio_before_it_ends() {
         // The producer trickles samples out, so a drain in the middle sees the
@@ -583,17 +600,12 @@ mod tests {
             "printf '\\001\\000\\002\\000'; sleep 0.3; printf '\\003\\000'; sleep 0.3",
         ]);
         let mut recording = Recording::start(&config).unwrap();
-        std::thread::sleep(Duration::from_millis(150));
-        let first = recording.drain();
-        assert_eq!(first.samples(), [1, 2], "the first drain takes what exists");
 
-        std::thread::sleep(Duration::from_millis(300));
-        let second = recording.drain();
-        assert_eq!(
-            second.samples(),
-            [3],
-            "the second drain takes only the rest"
-        );
+        let first = drain_until(&mut recording, 2);
+        assert_eq!(first, [1, 2], "the first drain takes what exists");
+
+        let second = drain_until(&mut recording, 1);
+        assert_eq!(second, [3], "the second drain takes only the rest");
 
         assert!(recording.drain().is_empty(), "nothing is taken twice");
         let whole = recording.stop().unwrap();
@@ -614,8 +626,10 @@ mod tests {
     #[test]
     fn a_producer_that_keeps_running_is_stopped() {
         let config = command_capture(&["sh", "-c", "head -c 3200 /dev/zero; sleep 30"]);
-        let recording = Recording::start(&config).unwrap();
-        std::thread::sleep(Duration::from_millis(150));
+        let mut recording = Recording::start(&config).unwrap();
+        // Wait for the samples, not for a sleep: the point of the test is that
+        // stopping does not wait for the producer, not that 150ms is enough.
+        assert_eq!(drain_until(&mut recording, 1600).len(), 1600);
         let started = Instant::now();
         let audio = recording.stop().unwrap();
 
