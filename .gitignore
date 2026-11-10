@@ -22,3 +22,17 @@ rustc-ice-*.txt
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# Python / maturin
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+*.egg-info/
+python/blablablars/_native*.so
+python/blablablars/_native*.pyd
+.pytest_cache/
+
+# The example extension is its own workspace; tests build it into target/plugin-fixture.
+examples/rust-plugin/target/

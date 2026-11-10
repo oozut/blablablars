@@ -1,0 +1,44 @@
+[workspace]
+members = [
+    "crates/blablablars-core",
+    "crates/blablablars-cli",
+    "crates/blablablars-python",
+    "crates/blablablars-pythonhost",
+]
+# Built separately: it is a cdylib fixture for the dynamic-extension tests and
+# must not be part of the normal build.
+exclude = ["examples/rust-plugin"]
+# Everything except the bindings: `cargo test` must not try to link a Python
+# extension module against libpython.
+default-members = ["crates/blablablars-core", "crates/blablablars-cli"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/oozut/blablablars"
+authors = ["Guillaume <oozut@users.noreply.github.com>"]
+
+[workspace.dependencies]
+blablablars-core = { path = "crates/blablablars-core", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+sha2 = "0.10"
+libloading = "0.8"
+# A maintained fork of the archived `serde_yaml`, same API.
+serde_norway = "0.9"
+regex = "1"
+clap = { version = "4", features = ["derive"] }
+pyo3 = { version = "0.30", default-features = false, features = ["macros", "abi3-py310"] }
+
+[workspace.lints.rust]
+# `deny`, not `forbid`: the dynamic-extension loader and the `export_plugin!`
+# glue need a small, audited amount of `unsafe`, and a plugin crate must be able
+# to opt in with an inner `#[allow(unsafe_code)]`.
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

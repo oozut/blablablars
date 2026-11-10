@@ -1,0 +1,20 @@
+[package]
+name = "blablablars-pythonhost"
+description = "Runs Python extensions inside the application's own process"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+blablablars-core.workspace = true
+serde_json.workspace = true
+# `auto-initialize` + a linked libpython: this crate *embeds* the interpreter.
+# It must not be built together with `blablablars-python`, which exports a
+# module instead (see docs/extensions.md).
+pyo3 = { version = "0.30", default-features = false, features = ["macros", "auto-initialize"] }
+
+[lints]
+workspace = true

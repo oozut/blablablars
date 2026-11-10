@@ -1,0 +1,29 @@
+[package]
+name = "blablablars-python"
+description = "PyO3 bindings that expose the blablablars core to Python"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "_native"
+crate-type = ["cdylib", "rlib"]
+# `cargo test -p blablablars-python` links against libpython, which needs the
+# `extension-module` feature to be disabled. Maturin turns it on when building
+# the wheel (see python/pyproject.toml).
+doctest = false
+
+[dependencies]
+blablablars-core.workspace = true
+pyo3.workspace = true
+serde_json.workspace = true
+
+[features]
+default = ["extension-module"]
+extension-module = ["pyo3/extension-module"]
+
+[lints]
+workspace = true
