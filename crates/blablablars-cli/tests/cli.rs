@@ -6,6 +6,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::OnceLock;
 
 fn blablablars() -> Command {
     Command::new(env!("CARGO_BIN_EXE_blablablars"))
@@ -209,32 +210,85 @@ fn fixture_library_name() -> String {
     format!("{stem}.{extension}")
 }
 
-/// Build `examples/rust-plugin` on demand (incremental, separate target dir).
+/// The fixture `cdylib`, built once (incremental, separate target dir).
+///
+/// Once, because half the tests in this file want it: two cargo runs sharing a
+/// target directory are a race — one can finish while the other is uplifting the
+/// artefact, and the loser is left with a fingerprint and no file.
 fn rust_extension() -> PathBuf {
+    static ARTIFACT: OnceLock<PathBuf> = OnceLock::new();
+    ARTIFACT
+        .get_or_init(|| build_rust_extension().unwrap_or_else(|error| panic!("{error}")))
+        .clone()
+}
+
+fn build_rust_extension() -> Result<PathBuf, String> {
     let root = workspace_root();
+    let target_dir = root.join("target").join("plugin-fixture");
     let profile = if cfg!(debug_assertions) {
         "debug"
     } else {
         "release"
     };
-    let target_dir = root.join("target").join("plugin-fixture");
-    let artifact = target_dir.join(profile).join(fixture_library_name());
 
+    let mut last = String::new();
+    for attempt in 0..2 {
+        if attempt == 1 {
+            // Cargo says "Finished" without touching anything when it thinks the
+            // crate is up to date, and a cache that restores fingerprints but
+            // not artefacts produces exactly that. Taking the fingerprints away
+            // is cheap next to a mystery, and the dependencies stay built.
+            let _ = std::fs::remove_dir_all(target_dir.join(profile).join(".fingerprint"));
+        }
+        let (artifact, stderr) = run_fixture_build(&root, &target_dir)?;
+        match artifact {
+            Some(artifact) => return Ok(artifact),
+            None => last = stderr,
+        }
+    }
+    Err(format!(
+        "building examples/rust-plugin reported success but produced no {}:\n{last}",
+        fixture_library_name()
+    ))
+}
+
+fn run_fixture_build(root: &Path, target_dir: &Path) -> Result<(Option<PathBuf>, String), String> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let output = Command::new(cargo)
         .arg("build")
         .arg("--manifest-path")
         .arg(root.join("examples/rust-plugin/Cargo.toml"))
         .arg("--target-dir")
-        .arg(&target_dir)
+        .arg(target_dir)
+        // Ask cargo where the file is instead of guessing: `build.target` in a
+        // cargo config, or `CARGO_BUILD_TARGET` in the environment, moves it
+        // under `target/plugin-fixture/<triple>/`.
+        .arg("--message-format=json-render-diagnostics")
         .output()
-        .expect("cargo must be runnable to build the example extension");
-    assert!(
-        output.status.success(),
-        "building examples/rust-plugin failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    artifact
+        .map_err(|error| {
+            format!("cargo must be runnable to build the example extension: {error}")
+        })?;
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !output.status.success() {
+        return Err(format!("building examples/rust-plugin failed:\n{stderr}"));
+    }
+    Ok((artifact_in_messages(&output.stdout), stderr))
+}
+
+/// The fixture library among cargo's JSON messages.
+fn artifact_in_messages(stdout: &[u8]) -> Option<PathBuf> {
+    let wanted = fixture_library_name();
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|message| message["reason"] == "compiler-artifact")
+        .filter_map(|message| message["filenames"].as_array().cloned())
+        .flatten()
+        .filter_map(|file| file.as_str().map(PathBuf::from))
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|file| file.to_string_lossy() == wanted)
+        })
 }
 
 /// The Python package, if it has been built (`maturin develop`).
