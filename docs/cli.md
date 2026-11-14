@@ -62,7 +62,7 @@ containing spaces must use a prefix.
 | flag | meaning |
 | --- | --- |
 | `--plugin SPEC`, `-p SPEC` | attach one plugin (repeatable) |
-| `--plugin-path DIR` | attach every `*.so`/`*.dylib`/`*.dll`/`*.py` in a directory, in name order (repeatable) |
+| `--plugin-path DIR` | attach every `*.so`/`*.dylib`/`*.dll`/`*.py` in a directory, in name order (repeatable); a library there that is not a plugin is skipped with a warning |
 | `--plugin-config FILE` | read this plugin list instead of the user's |
 | `--no-plugins` | ignore the environment and the plugin list |
 | `--python-path DIR` | add to the embedded interpreter's `sys.path` (repeatable) |

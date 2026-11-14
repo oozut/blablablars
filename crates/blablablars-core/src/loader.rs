@@ -48,13 +48,13 @@ impl DynamicExtension {
 
         // SAFETY: the symbol signature is the documented ABI entry point. Each
         // call creates a fresh instance, owned by this value until `Drop`.
-        let entry: libloading::Symbol<unsafe extern "C" fn() -> PluginVTable> =
-            unsafe { library.get(plugin_abi::ENTRY_POINT) }.map_err(|error| {
-                CoreError::Plugin(format!(
-                "`{}` is not a blablablars extension: no `blablablars_plugin_v1` symbol ({error})",
-                path.display()
-            ))
-            })?;
+        let entry: libloading::Symbol<unsafe extern "C" fn() -> PluginVTable> = unsafe {
+            library.get(plugin_abi::ENTRY_POINT)
+        }
+        .map_err(|error| CoreError::NotAnExtension {
+            path: path.display().to_string(),
+            detail: error.to_string(),
+        })?;
 
         let vtable = unsafe { entry() };
 

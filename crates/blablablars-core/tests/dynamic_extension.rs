@@ -152,15 +152,11 @@ fn a_library_without_the_entry_point_is_rejected() {
     };
     match DynamicExtension::open(candidate) {
         Ok(_) => panic!("`{candidate}` must not load as a plugin"),
-        Err(blablablars_core::CoreError::Plugin(message)) => {
-            if message.contains("could not load the shared library") {
-                // Not present on this system: nothing to assert.
-                return;
-            }
-            assert!(
-                message.contains("not a blablablars extension"),
-                "unexpected message: {message}"
-            );
+        // Not present on this system: nothing to assert.
+        Err(blablablars_core::CoreError::Plugin(message))
+            if message.contains("could not load the shared library") => {}
+        Err(blablablars_core::CoreError::NotAnExtension { path, .. }) => {
+            assert_eq!(path, candidate);
         }
         Err(other) => panic!("unexpected error: {other}"),
     }

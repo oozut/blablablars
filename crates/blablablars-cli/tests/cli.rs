@@ -182,6 +182,52 @@ fn a_missing_program_fails_with_a_helpful_message() {
     assert!(stderr(&output).contains("could not start plugin"));
 }
 
+/// Some shared library on this machine that is certainly not an extension.
+fn plain_library() -> Option<PathBuf> {
+    [
+        "/lib/x86_64-linux-gnu/libm.so.6",
+        "/usr/lib/x86_64-linux-gnu/libm.so.6",
+        "/lib/aarch64-linux-gnu/libm.so.6",
+        "/usr/lib/aarch64-linux-gnu/libm.so.6",
+        "/lib64/libm.so.6",
+        "/usr/lib/libm.so.6",
+        "/usr/lib/libSystem.B.dylib",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .find(|path| path.is_file())
+}
+
+#[test]
+fn a_library_in_a_plugin_directory_that_is_not_a_plugin_is_skipped_out_loud() {
+    let Some(library) = plain_library() else {
+        return;
+    };
+    let directory = std::env::temp_dir().join(format!("blablablars-scan-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("temp dir should be creatable");
+    let extension = if cfg!(target_os = "macos") {
+        "dylib"
+    } else {
+        "so"
+    };
+    let copy = directory.join(format!("libnotaplugin.{extension}"));
+    std::fs::copy(&library, &copy).expect("the library should be copyable");
+
+    let output = run(&["run", "hi", "--plugin-path", directory.to_str().unwrap()]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("hi"), "{}", stdout(&output));
+    // Skipped, but not quietly: the user is told what was left out and why.
+    assert!(stderr(&output).contains("skipping"), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("not a blablablars extension"),
+        "{}",
+        stderr(&output)
+    );
+
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 // ---------------------------------------------------------------------------
 // In-process extensions: compiled Rust libraries and embedded Python plugins.
 // ---------------------------------------------------------------------------

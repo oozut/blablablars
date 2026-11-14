@@ -206,7 +206,9 @@ for exactly this reason; `default-members` keeps the module out of the ordinary
 
 | situation | what happens |
 | --- | --- |
-| library is not an extension / ABI mismatch | load fails, message names both sides |
+| library found in a plugin directory is not an extension | skipped with a warning; the rest of the directory still loads |
+| library named explicitly is not an extension | load fails, message names the file |
+| ABI mismatch | load fails, message names both sides |
 | extension subscribes to an unknown hook | load fails, message lists known hooks |
 | duplicate extension name | registration fails (`DuplicateExtension`) |
 | hook raises / returns a bad payload | run fails with `extension: hook: message` |
