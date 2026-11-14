@@ -172,7 +172,9 @@ language: en                    # or `auto` to detect it
 
 capture:
   kind: auto                    # auto | command
+  device: null                  # null = whatever the capture program defaults to
   argv: []                      # for `kind: command`
+  max_seconds: 600              # a recording stops here; later audio is dropped
 
 models:
   directory: ~/.local/share/blablablars/models
@@ -206,7 +208,16 @@ stream:
 ```
 
 `blablablars config show` prints the config as it is in effect, defaults
-included; `blablablars config path` prints the file that would be read.
+included; `blablablars config path` prints the file that would be read. Every
+key it prints is written down in this section — that is the promise, and
+`crates/blablablars-cli/tests/docs.rs` fails when one is not.
+
+`capture.device` is passed to the capture program in that program's own form,
+because they disagree: `--device=NAME` for `parecord`, a bare `NAME` for
+`pw-record` and `arecord`, `:INDEX` for ffmpeg's AVFoundation input on macOS
+(a bare `INDEX` is taken as one), and the DirectShow device name on Windows
+(`ffmpeg -list_devices true -f dshow -i dummy` prints them). `null` uses the
+program's own default, which is what `kind: auto` picks anyway.
 
 ### Cleanup
 

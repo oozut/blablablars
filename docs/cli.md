@@ -154,6 +154,44 @@ which one the config selects, and how many of the downloaded models it can read;
 `--json` gives `{"config", "default_model", "models_directory", "engines":
 [{"kind","label","program","installed","configured","runnable_models"}]}`.
 
+## Exit codes
+
+| code | meaning |
+|---|---|
+| `0` | the command did what it was asked |
+| `1` | it did not: a plugin that will not load, a model that is missing, a transcript that never came. The reason is one `error:` line on stderr |
+| `2` | the command line itself was wrong — an unknown flag or subcommand, refused by `clap` before anything runs |
+
+Nothing to do is not a failure: a run with no plugins attached, or a dictation
+that found no speech, exits `0`.
+
+## JSON shapes
+
+Every `--json` prints one document on stdout and nothing else. Diagnostics go to
+stderr, so the output can be piped straight into a parser.
+
+```
+run --json            analysis[text, words, characters, digest, input_digest], trace
+version --json        name, version, protocol, hooks, plugin_kinds, plugin_config, transports[process, python, rust]
+hooks --json          (array)
+plugins --json        (array) spec, name, hooks
+plugin list --json    config, plugins[spec, kind, target]
+models --json         directory, default, models[name, file, bytes, size, layout, default]
+engines --json        config, models_directory, default_model, engines[kind, label, program, installed, configured, runnable_models]
+dictate --json        text, raw, model, transcriber, audio_seconds, elapsed_ms, trace
+```
+
+Those names and their meanings are the interface: a key is never removed or
+given a different job, and a new one is added only with a line here.
+`crates/blablablars-cli/tests/docs.rs` fails when the program emits a key this
+list does not have.
+
+`analysis.text` is the text the run reports; `analysis.digest` is the SHA-256 of
+exactly that text, so the two can always be checked against each other.
+`analysis.input_digest` is the SHA-256 of the text as it entered the analysis,
+before output extensions could rewrite it — equal to `digest` unless something
+rewrote the text.
+
 ## Adding a transport (for maintainers)
 
 The grammar, not the flag list, is the extension point:
@@ -172,10 +210,9 @@ point: `--plugin`, `BLABLABLARS_PLUGINS` and the plugin list keep their meaning.
 ## Stability
 
 The spec grammar, the flag names in the tables above, the environment variable
-names, the plugin-list format, the config keys named in
-[`dictation.md`](dictation.md) and the JSON shapes of `plugins --json`,
-`plugin list --json`, `models --json` and `engines --json` are the long-term
-interface, and so is the platform matrix in
+names, the plugin-list format, the exit codes above, every config key named in
+[`dictation.md`](dictation.md) and every JSON key in the shapes above are the
+long-term interface, and so is the platform matrix in
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml): Linux, macOS and
 Windows, on x86-64 and arm64, built and tested on a real machine of each kind. New
 transports arrive as new kinds; new backends arrive as new `transcriber.kind`
