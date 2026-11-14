@@ -37,7 +37,7 @@ pub fn from_config(
     language: &str,
     model: &Model,
 ) -> Result<Box<dyn Transcriber>, CoreError> {
-    let binary = config.program();
+    let binary = super::platform::resolve_program(&config.program());
     let timeout = Duration::from_secs(config.timeout_seconds);
 
     Ok(match config.kind {
@@ -310,6 +310,7 @@ impl Transcriber for CommandTranscriber {
             .first()
             .cloned()
             .ok_or_else(|| CoreError::Voice("`transcriber.argv` is empty".to_string()))?;
+        let program = super::platform::resolve_program(&program);
         let mut command = Command::new(&program);
         command.args(&argv[1..]);
 
@@ -348,21 +349,27 @@ fn transcript_from_stdout(stdout: &[u8]) -> String {
 }
 
 /// A WAV file that removes itself, so the audio never outlives the call.
+///
+/// It is written `0600` inside a private directory: a dictation is the user's
+/// speech, and a shared temporary directory would let any other account read it
+/// while the transcriber runs.
 struct TempWav {
     path: PathBuf,
 }
 
 impl TempWav {
     fn write(audio: &Audio) -> Result<Self, CoreError> {
-        let path = std::env::temp_dir().join(format!(
+        let directory = super::platform::private_temp_dir()?;
+        let path = directory.join(format!(
             "blablablars-{}-{}.wav",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_nanos())
-                .unwrap_or(0)
+            super::platform::unique_suffix()
         ));
-        audio::write_wav(&path, audio)?;
+        audio::write_wav(&path, audio).map_err(|error| {
+            CoreError::Voice(format!(
+                "cannot write the audio for the transcriber: {error}"
+            ))
+        })?;
         Ok(Self { path })
     }
 
@@ -490,6 +497,34 @@ mod tests {
             language: "en".to_string(),
             timeout,
         }
+    }
+
+    #[test]
+    fn the_audio_handed_to_a_transcriber_is_private_and_temporary() {
+        let wav = TempWav::write(&audio()).expect("a temp wav");
+        let path = wav.path().to_path_buf();
+        assert!(path.is_file(), "{}", path.display());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o077, 0, "the audio is readable by others: {mode:o}");
+            let parent = path.parent().expect("a parent").to_path_buf();
+            let parent_mode = std::fs::metadata(&parent)
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(
+                parent_mode & 0o077,
+                0,
+                "the directory is readable by others: {parent_mode:o}"
+            );
+        }
+        drop(wav);
+        assert!(!path.exists(), "the audio outlived the call");
     }
 
     #[test]

@@ -389,6 +389,54 @@ fn the_shortcut_starts_a_recording_and_the_next_press_types_it() {
     let _ = sandbox.run(&["dictate", "--config", &config, "--toggle"]);
 }
 
+#[cfg(unix)]
+#[test]
+fn the_session_note_is_private_to_the_user() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let sandbox = Sandbox::new("togglenote");
+    let config = sandbox.config("good morning");
+    let config = config.to_str().unwrap().to_string();
+    let start = sandbox.run(&["dictate", "--config", &config, "--toggle"]);
+    assert!(start.status.success(), "{}", stderr(&start));
+
+    let directory = sandbox.root.join("run").join("blablablars");
+    let mode = std::fs::metadata(&directory).unwrap().permissions().mode();
+    assert_eq!(mode & 0o077, 0, "the directory is open to others: {mode:o}");
+
+    let notes: Vec<PathBuf> = std::fs::read_dir(&directory)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .collect();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    let mode = std::fs::metadata(&notes[0]).unwrap().permissions().mode();
+    assert_eq!(mode & 0o077, 0, "the note is readable by others: {mode:o}");
+
+    // The token is the secret that stops the recording, so it is 128 bits of
+    // entropy rather than the pid and the clock it used to be.
+    let note = std::fs::read_to_string(&notes[0]).unwrap();
+    let token = note
+        .split("\"token\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect(&note);
+    assert_eq!(token.len(), 32, "{token}");
+    assert!(token.chars().all(|c| c.is_ascii_hexdigit()), "{token}");
+
+    std::thread::sleep(Duration::from_millis(300));
+    let stop = sandbox.run(&["dictate", "--config", &config, "--toggle"]);
+    assert!(stop.status.success(), "{}", stderr(&stop));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline && !sandbox.path("typed.txt").exists() {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[test]
 fn config_init_writes_a_file_that_reads_back() {
     let sandbox = Sandbox::new("init");

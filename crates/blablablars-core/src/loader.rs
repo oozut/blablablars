@@ -59,10 +59,22 @@ impl DynamicExtension {
         let vtable = unsafe { entry() };
 
         if vtable.abi_version != ABI_VERSION {
+            // The table is not the one this build was compiled against, so
+            // `drop_instance` cannot be trusted either: the instance is left to
+            // the unload rather than released through a layout that may differ.
             return Err(CoreError::Plugin(format!(
                 "`{}` targets plugin ABI {}, this build speaks {ABI_VERSION}; rebuild the extension",
                 path.display(),
                 vtable.abi_version
+            )));
+        }
+
+        // A table with no instance is one that was never initialised, and every
+        // function below would be handed a null pointer.
+        if vtable.instance.is_null() {
+            return Err(CoreError::Plugin(format!(
+                "`{}` returned an entry point with no instance",
+                path.display()
             )));
         }
 

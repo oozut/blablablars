@@ -90,9 +90,13 @@ hook and the plugin's message, so failures are attributable in the CLI output.
 1. Requests are strictly sequential: one outstanding request at a time. The host
    serialises access with a mutex, so a plugin does not need to be concurrent.
 2. A plugin that exits, crashes or writes garbage mid-request is an error, not a
-   hang: the host's `read_line` returns 0 and reports
+   hang: the host's reader reaches end of file and reports
    "plugin closed its stdout before answering request N".
-3. Startup latency is paid once per pipeline, not per hook: the process is
+3. A plugin that never answers is an error too. Each request has a deadline of
+   60 seconds, after which the run fails with
+   "plugin did not answer request N within 60s" rather than waiting for ever
+   with the pipeline blocked.
+4. Startup latency is paid once per pipeline, not per hook: the process is
    long-lived for the duration of a run.
 
 ## Implementing it in another language

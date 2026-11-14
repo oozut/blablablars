@@ -213,6 +213,7 @@ for exactly this reason; `default-members` keeps the module out of the ordinary
 | extension panics | caught, reported as an extension error |
 | Python plugin raises | reported as an extension error (host stays up) |
 | child process dies | reported as a plugin error |
+| child process never answers | the request times out after 60s, reported as a plugin error |
 
 ## Threading and state
 

@@ -276,6 +276,7 @@ impl CommandEngine {
             .first()
             .cloned()
             .ok_or_else(|| CoreError::Voice("`stream.command` is empty".to_string()))?;
+        let program = super::platform::resolve_program(&program);
 
         let mut command = Command::new(&program);
         command
@@ -424,6 +425,13 @@ impl LiveEngine for CommandEngine {
                 }
                 Err(_) => break,
             }
+        }
+        // The budget was for the lines, and it has run out. An engine still
+        // running has nothing left to say — it is ignoring the end of its input
+        // — so it is stopped rather than waited for, or the session would hang
+        // for as long as the program likes.
+        if !matches!(self.child.try_wait(), Ok(Some(_))) {
+            let _ = self.child.kill();
         }
         let _ = self.child.wait();
         Ok(latest)
@@ -734,6 +742,24 @@ mod tests {
             CommandEngine::start(&argv, &model, "en", Duration::from_millis(300)).unwrap();
         let error = engine.step(&speaker(16_000, 1.0)).unwrap_err().to_string();
         assert!(error.contains("printed nothing"), "{error}");
+    }
+
+    #[test]
+    fn finishing_a_wedged_engine_does_not_wait_for_it() {
+        // `sleep` never reads its input, so closing stdin says nothing to it.
+        // The budget is the wait, not a suggestion: the session must not hang
+        // for as long as the program likes.
+        let argv = vec!["sh".to_string(), "-c".to_string(), "sleep 30".to_string()];
+        let model = Model::unresolved("none");
+        let mut engine =
+            CommandEngine::start(&argv, &model, "en", Duration::from_millis(300)).unwrap();
+        let started = std::time::Instant::now();
+        assert_eq!(engine.finish(&speaker(16_000, 1.0)).unwrap(), "");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "finish waited {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

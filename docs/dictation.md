@@ -69,6 +69,11 @@ The session is a loopback TCP port noted down in a small file in the runtime
 directory, so a crash cannot leave a stale pid file behind, and the same code
 works on all three systems — a Unix domain socket would not.
 
+That note holds the token that stops the recording, so it is written `0600` in a
+`0700` directory and a note any other account could read is ignored rather than
+obeyed. The token is 128 bits from the operating system, not the pid and the
+clock.
+
 One Windows detail: a detached recorder inherits whatever standard handles the
 process that started it had, so a script that pipes `blablablars dictate
 --toggle` and waits for end-of-file waits until the recording is stopped. A
@@ -303,6 +308,10 @@ stdout is the transcript. That is how a remote API, a Python script or a runtime
 nobody has written a backend for is wired in — no new Rust code, no new flag. A
 name with no file behind it is passed through unresolved, so `{model_name}` can
 be a Hugging Face id.
+
+The audio is handed over as a `0600` file in a private directory — a dictation is
+the user's speech, so it is not left world-readable in a shared temporary
+directory — and removed when the call returns.
 
 ## Output
 
