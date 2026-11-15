@@ -29,6 +29,7 @@ pub struct Analysis {
     words: usize,
     characters: usize,
     digest: String,
+    input_digest: String,
 }
 
 #[pymethods]
@@ -53,19 +54,27 @@ impl Analysis {
         &self.digest
     }
 
+    /// The identity of the text this run started from, before any output
+    /// extension rewrote it. Equal to `digest` when nothing rewrote it.
+    #[getter]
+    fn input_digest(&self) -> &str {
+        &self.input_digest
+    }
+
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let dict = PyDict::new(py);
         dict.set_item("text", &self.text)?;
         dict.set_item("words", self.words)?;
         dict.set_item("characters", self.characters)?;
         dict.set_item("digest", &self.digest)?;
+        dict.set_item("input_digest", &self.input_digest)?;
         Ok(dict)
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "Analysis(text={:?}, words={}, characters={}, digest={:?})",
-            self.text, self.words, self.characters, self.digest
+            "Analysis(text={:?}, words={}, characters={}, digest={:?}, input_digest={:?})",
+            self.text, self.words, self.characters, self.digest, self.input_digest
         )
     }
 
@@ -74,6 +83,7 @@ impl Analysis {
             && self.words == other.words
             && self.characters == other.characters
             && self.digest == other.digest
+            && self.input_digest == other.input_digest
     }
 }
 
@@ -281,6 +291,7 @@ impl Pipeline {
                 words: run.analysis.words,
                 characters: run.analysis.characters,
                 digest: run.analysis.digest,
+                input_digest: run.analysis.input_digest,
             },
             trace: run.trace,
         })
@@ -311,6 +322,7 @@ fn analyse(text: &str) -> Analysis {
         words: analysis.words,
         characters: analysis.characters,
         digest: analysis.digest,
+        input_digest: analysis.input_digest,
     }
 }
 

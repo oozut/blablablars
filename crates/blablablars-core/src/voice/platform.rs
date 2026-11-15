@@ -16,6 +16,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::error::CoreError;
+
 /// The desktop conventions this build runs under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Desktop {
@@ -189,6 +191,113 @@ pub fn find_program(program: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// The path to run for `program`, resolved before the OS searches for it.
+///
+/// `Command::new("whisper-cli")` hands the name to the operating system, and on
+/// Windows the search order starts with the **current directory**: running the
+/// binary inside a checked-out repository would execute a `whisper-cli.exe`
+/// dropped there, which is exactly what the plugin trust model says cannot
+/// happen. Every program this crate runs goes through here first, so the name
+/// is turned into the absolute path `PATH` already points at.
+///
+/// A name that is not on `PATH` comes back unchanged, so the spawn still fails
+/// with the message the user can act on.
+pub fn resolve_program(program: &str) -> String {
+    if program.is_empty() {
+        return String::new();
+    }
+    find_program(program)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| program.to_string())
+}
+
+/// Create `path` if needed, and make sure only this user can use it.
+///
+/// The session note and the temporary WAV both hold private material, and the
+/// fallback location for the session note is a shared temporary directory. Two
+/// checks make that safe: the directory is set to `0700`, and a file is created
+/// inside it. An account that pre-created the directory fails one of the two —
+/// a directory it owns rejects the `chmod`, a `0700` one rejects the create — so
+/// a planted directory cannot be used to watch this session.
+pub fn ensure_private_dir(path: &Path) -> Result<(), CoreError> {
+    match std::fs::create_dir_all(path) {
+        Ok(()) => {}
+        // Something is already there: the checks below decide whether it is
+        // usable, and say why when it is not.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    if !path.is_dir() {
+        return Err(CoreError::Voice(format!(
+            "`{}` is not a private directory: it is not a directory",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let probe = path.join(format!(
+        ".blablablars-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    match options.open(&probe) {
+        Ok(file) => {
+            drop(file);
+            let _ = std::fs::remove_file(&probe);
+            Ok(())
+        }
+        Err(error) => Err(CoreError::Voice(format!(
+            "`{}` is not a private directory: {error}",
+            path.display()
+        ))),
+    }
+}
+
+/// Where a file holding audio may live.
+///
+/// The runtime directory first, then the state directory, then — only when
+/// neither can be secured — a per-user name under the temporary directory. Every
+/// candidate is checked by [`ensure_private_dir`], so a location another account
+/// controls is passed over instead of used.
+pub fn private_temp_dir() -> Result<PathBuf, CoreError> {
+    // The runtime directory first: on a desktop session it is the user's own
+    // and short-lived. The state directory is the same idea inside the home
+    // tree, and only when neither can be secured does this fall back to a
+    // per-user name in the temporary directory.
+    let candidates = [
+        runtime_dir().map(|dir| dir.join("audio")),
+        state_dir().map(|dir| dir.join("audio")),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        if ensure_private_dir(&candidate).is_ok() {
+            return Ok(candidate);
+        }
+    }
+    let fallback = std::env::temp_dir()
+        .join(format!("blablablars-{}", user_tag()))
+        .join("audio");
+    ensure_private_dir(&fallback)?;
+    Ok(fallback)
+}
+
+/// A value that differs between two calls in the same process.
+pub(crate) fn unique_suffix() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0)
 }
 
 /// A per-user tag for a file name, so two accounts never share one session.
@@ -419,6 +528,53 @@ mod tests {
             expand_home(Path::new("relative")),
             PathBuf::from("relative")
         );
+    }
+
+    #[test]
+    fn a_program_is_resolved_before_the_os_searches_for_it() {
+        // The point is the absolute path: a bare name makes Windows look in the
+        // current directory first, and that is a directory the user's repository
+        // controls.
+        let resolved = resolve_program("sh");
+        assert!(
+            Path::new(&resolved).is_absolute(),
+            "`sh` resolved to `{resolved}`"
+        );
+        assert_eq!(find_program("sh"), Some(PathBuf::from(&resolved)));
+
+        // Not found: the name comes back as written, so the error names it.
+        assert_eq!(
+            resolve_program("blablablars-no-such-program"),
+            "blablablars-no-such-program"
+        );
+        assert_eq!(resolve_program(""), "");
+    }
+
+    #[test]
+    fn a_private_directory_is_created_and_a_file_is_not_one() {
+        let directory = std::env::temp_dir().join(format!(
+            "blablablars-private-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        ensure_private_dir(&directory).expect("a private directory");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&directory).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "{mode:o}");
+        }
+
+        // A file in the way is refused with a message that says so, rather than
+        // a bare io error: this is the shape a planted path takes.
+        let file = directory.join("a-file");
+        std::fs::write(&file, b"x").unwrap();
+        let error = ensure_private_dir(&file).unwrap_err().to_string();
+        assert!(error.contains("not a private directory"), "{error}");
+
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]

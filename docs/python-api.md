@@ -10,10 +10,12 @@ import blablablars
 
 # One-shot
 analysis = blablablars.analyse("hello brave world")
-analysis.text       # "hello brave world"
-analysis.words      # 3
-analysis.characters # 17
-analysis.digest     # sha256 hex
+analysis.text         # "hello brave world"
+analysis.words        # 3
+analysis.characters   # 17
+analysis.digest       # sha256 hex of the reported text
+analysis.input_digest # sha256 hex of the text as it entered the analysis;
+                      # equal to `digest` until an extension rewrites the text
 
 # With a pipeline (extension point even when empty)
 pipeline = blablablars.Pipeline()

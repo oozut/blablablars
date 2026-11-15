@@ -69,6 +69,11 @@ The session is a loopback TCP port noted down in a small file in the runtime
 directory, so a crash cannot leave a stale pid file behind, and the same code
 works on all three systems — a Unix domain socket would not.
 
+That note holds the token that stops the recording, so it is written `0600` in a
+`0700` directory and a note any other account could read is ignored rather than
+obeyed. The token is 128 bits from the operating system, not the pid and the
+clock.
+
 One Windows detail: a detached recorder inherits whatever standard handles the
 process that started it had, so a script that pipes `blablablars dictate
 --toggle` and waits for end-of-file waits until the recording is stopped. A
@@ -167,7 +172,9 @@ language: en                    # or `auto` to detect it
 
 capture:
   kind: auto                    # auto | command
+  device: null                  # null = whatever the capture program defaults to
   argv: []                      # for `kind: command`
+  max_seconds: 600              # a recording stops here; later audio is dropped
 
 models:
   directory: ~/.local/share/blablablars/models
@@ -201,7 +208,16 @@ stream:
 ```
 
 `blablablars config show` prints the config as it is in effect, defaults
-included; `blablablars config path` prints the file that would be read.
+included; `blablablars config path` prints the file that would be read. Every
+key it prints is written down in this section — that is the promise, and
+`crates/blablablars-cli/tests/docs.rs` fails when one is not.
+
+`capture.device` is passed to the capture program in that program's own form,
+because they disagree: `--device=NAME` for `parecord`, a bare `NAME` for
+`pw-record` and `arecord`, `:INDEX` for ffmpeg's AVFoundation input on macOS
+(a bare `INDEX` is taken as one), and the DirectShow device name on Windows
+(`ffmpeg -list_devices true -f dshow -i dummy` prints them). `null` uses the
+program's own default, which is what `kind: auto` picks anyway.
 
 ### Cleanup
 
@@ -303,6 +319,10 @@ stdout is the transcript. That is how a remote API, a Python script or a runtime
 nobody has written a backend for is wired in — no new Rust code, no new flag. A
 name with no file behind it is passed through unresolved, so `{model_name}` can
 be a Hugging Face id.
+
+The audio is handed over as a `0600` file in a private directory — a dictation is
+the user's speech, so it is not left world-readable in a shared temporary
+directory — and removed when the call returns.
 
 ## Output
 

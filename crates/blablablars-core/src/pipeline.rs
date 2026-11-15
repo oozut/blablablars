@@ -12,14 +12,29 @@ use crate::error::{CoreError, ExtensionError};
 use crate::extension::{Extension, Registry, HOOK_INPUT, HOOK_OUTPUT};
 
 /// What the core computes for one piece of text.
+///
+/// `text` is the only field an extension owns; the rest describe it. The core
+/// derives them from `text` after the output extensions have run, so they always
+/// agree with what is reported, whatever an extension returned.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Analysis {
-    /// The text that was actually analysed (after input extensions ran).
+    /// The text that was actually analysed (after input extensions ran, and after
+    /// the output extensions had their say).
     pub text: String,
+    /// Words in `text`, as the core counts them.
+    #[serde(default)]
     pub words: usize,
+    /// Characters in `text`, as the core counts them.
+    #[serde(default)]
     pub characters: usize,
-    /// Lowercase hex SHA-256 of `text`, a stable identity for the input.
+    /// Lowercase hex SHA-256 of `text`: the identity of what is reported.
+    #[serde(default)]
     pub digest: String,
+    /// Lowercase hex SHA-256 of the text as it entered the analysis stage, before
+    /// the output extensions ran: the identity that survives a rewrite of `text`,
+    /// for keying caches and records. Equal to `digest` when nothing rewrote it.
+    #[serde(default)]
+    pub input_digest: String,
 }
 
 /// One pipeline execution.
@@ -83,22 +98,32 @@ impl Pipeline {
                 message: "expected an object with a string `text` field".to_string(),
             }
         })?;
-        let analysis = analyse(effective);
+        let analysed = analyse(effective);
+        // Taken before the output extensions run, because that is the identity of
+        // the text this run started from, and the one thing they cannot rewrite.
+        let input_digest = analysed.digest.clone();
 
-        let mut payload = json!({ "analysis": analysis });
+        let mut payload = json!({ "analysis": analysed });
         if !self.registry.is_empty() {
             let dispatch = self.registry.dispatch(HOOK_OUTPUT, payload)?;
             payload = dispatch.payload;
             trace.extend(dispatch.trace);
         }
 
-        let analysis: Analysis =
+        let returned: Analysis =
             serde_json::from_value(payload.get("analysis").cloned().ok_or_else(|| {
                 ExtensionError::InvalidPayload {
                     hook: HOOK_OUTPUT.to_string(),
                     message: "the returned payload must contain an `analysis` object".to_string(),
                 }
             })?)?;
+
+        // The output extensions own `text` and nothing else: whatever they report
+        // as `text` is analysed again here, so the counts and the digest describe
+        // the text the caller is handed back. Without this a hook that redacts
+        // "secret" reports sha256("secret") next to "[redacted]", which is a
+        // fingerprint of the thing it just removed.
+        let analysis = derived(&returned.text, input_digest);
 
         Ok(Run { analysis, trace })
     }
@@ -113,14 +138,34 @@ impl std::fmt::Debug for Pipeline {
 }
 
 /// The built-in stage. Pure, deterministic and dependency-free by design.
+///
+/// `digest` and `input_digest` are equal here: they part company only when an
+/// output extension rewrites the text after this has run.
 pub fn analyse(text: &str) -> Analysis {
-    let digest = Sha256::digest(text.as_bytes());
+    let digest = sha256(text);
     Analysis {
         text: text.to_string(),
         words: text.split_whitespace().count(),
         characters: text.chars().count(),
-        digest: digest.iter().map(|byte| format!("{byte:02x}")).collect(),
+        digest: digest.clone(),
+        input_digest: digest,
     }
+}
+
+/// The analysis of `text`, carrying `input_digest` as the identity of the text
+/// that entered the stage.
+fn derived(text: &str, input_digest: String) -> Analysis {
+    Analysis {
+        input_digest,
+        ..analyse(text)
+    }
+}
+
+fn sha256(text: &str) -> String {
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[cfg(test)]
@@ -211,6 +256,67 @@ mod tests {
 
         assert_eq!(run.analysis.text, "a xxxxxx");
         assert_eq!(run.trace, vec!["redact: pipeline.output"]);
+    }
+
+    /// An output extension that hands back an analysis object and nothing else.
+    struct OnlyText(&'static str);
+
+    impl Extension for OnlyText {
+        fn name(&self) -> &str {
+            "terse"
+        }
+        fn hooks(&self) -> &[String] {
+            static HOOKS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+            HOOKS.get_or_init(|| vec![HOOK_OUTPUT.to_string()])
+        }
+        fn call(&self, _hook: &str, _payload: &Value) -> Result<Value, ExtensionError> {
+            Ok(json!({ "analysis": { "text": self.0 } }))
+        }
+    }
+
+    #[test]
+    fn the_report_never_disagrees_with_the_text_it_reports() {
+        let mut pipeline = Pipeline::new();
+        pipeline
+            .register(Rewrite::new("redact", HOOK_OUTPUT, "secret", "[redacted]"))
+            .unwrap();
+
+        let run = pipeline.run("a secret").unwrap();
+
+        // The counts and the digest describe what came back, not what went in.
+        assert_eq!(run.analysis.text, "a [redacted]");
+        assert_eq!(run.analysis.words, 2);
+        assert_eq!(run.analysis.characters, 12);
+        assert_eq!(run.analysis.digest, analyse("a [redacted]").digest);
+        // ... and the identity of the input is still there to key on, so a hook
+        // that redacts cannot pass off a fingerprint of the secret as the
+        // reported text's identity.
+        assert_eq!(run.analysis.input_digest, analyse("a secret").digest);
+        assert_ne!(run.analysis.input_digest, run.analysis.digest);
+    }
+
+    #[test]
+    fn a_run_nothing_rewrote_reports_one_identity() {
+        let run = Pipeline::new().run("one two").unwrap();
+
+        assert_eq!(run.analysis.digest, analyse("one two").digest);
+        assert_eq!(run.analysis.input_digest, run.analysis.digest);
+    }
+
+    #[test]
+    fn an_output_extension_may_return_a_bare_text_and_the_core_fills_in_the_rest() {
+        let mut pipeline = Pipeline::new();
+        pipeline
+            .register(Arc::new(OnlyText("three whole words")))
+            .unwrap();
+
+        let run = pipeline.run("hi").unwrap();
+
+        assert_eq!(run.analysis.text, "three whole words");
+        assert_eq!(run.analysis.words, 3);
+        assert_eq!(run.analysis.characters, 17);
+        assert_eq!(run.analysis.digest, analyse("three whole words").digest);
+        assert_eq!(run.analysis.input_digest, analyse("hi").digest);
     }
 
     #[test]

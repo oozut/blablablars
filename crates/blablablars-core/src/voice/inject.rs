@@ -226,8 +226,8 @@ impl Injector for PasteInjector {
     fn inject(&self, text: &str) -> Result<(), CoreError> {
         use std::io::Write as _;
 
-        let copy = &self.copy[0];
-        let mut child = Command::new(copy)
+        let copy = super::platform::resolve_program(&self.copy[0]);
+        let mut child = Command::new(&copy)
             .args(&self.copy[1..])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -257,8 +257,8 @@ impl Injector for PasteInjector {
             )));
         }
 
-        let paste = &self.paste[0];
-        let status = Command::new(paste)
+        let paste = super::platform::resolve_program(&self.paste[0]);
+        let status = Command::new(&paste)
             .args(&self.paste[1..])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -328,6 +328,7 @@ impl Injector for CommandInjector {
             .first()
             .cloned()
             .ok_or_else(|| CoreError::Voice("`output.argv` is empty".to_string()))?;
+        let program = super::platform::resolve_program(&program);
         let status = Command::new(&program)
             .args(&argv[1..])
             .stdin(Stdio::null())
@@ -358,7 +359,8 @@ impl Injector for KeyInjector {
 
     fn inject(&self, text: &str) -> Result<(), CoreError> {
         let (program, arguments) = self.command(text);
-        let output = Command::new(program)
+        let program = super::platform::resolve_program(program);
+        let output = Command::new(&program)
             .args(&arguments)
             .stdin(Stdio::null())
             .output()

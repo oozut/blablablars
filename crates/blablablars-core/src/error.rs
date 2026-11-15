@@ -39,6 +39,13 @@ pub enum CoreError {
     UnknownHook(String, String),
     #[error("plugin protocol error: {0}")]
     Plugin(String),
+    /// A shared library that does not export the plugin entry point. Its own
+    /// case rather than a generic plugin failure, because it is expected: a
+    /// directory of plugins can hold a library that is not one.
+    #[error(
+        "`{path}` is not a blablablars extension: no `blablablars_plugin_v1` symbol ({detail})"
+    )]
+    NotAnExtension { path: String, detail: String },
     #[error(transparent)]
     Extension(#[from] ExtensionError),
     #[error(transparent)]

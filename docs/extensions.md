@@ -34,6 +34,14 @@ cannot be loaded and for plugins that must be isolated; see
 * Extensions run in registration order; each receives the previous one's output.
 * An error from one extension fails that hook, and the run, with a message that
   names the extension and the hook.
+* An extension owns the payload's `text`, and nothing else. `pipeline.output` may
+  rewrite `text`; the core then derives `words`, `characters` and `digest` from
+  the text that comes back, so the analysis never contradicts itself. The digest
+  of the text as it entered the analysis is kept as `input_digest`, which no
+  extension can change — use it to key caches and records that must survive a
+  rewrite. A redacting extension therefore belongs in `pipeline.input`: redact
+  before the analysis and both digests describe the redacted text, so there is
+  no fingerprint of the original left in the result.
 
 ## Writing a Rust extension
 
@@ -206,13 +214,16 @@ for exactly this reason; `default-members` keeps the module out of the ordinary
 
 | situation | what happens |
 | --- | --- |
-| library is not an extension / ABI mismatch | load fails, message names both sides |
+| library found in a plugin directory is not an extension | skipped with a warning; the rest of the directory still loads |
+| library named explicitly is not an extension | load fails, message names the file |
+| ABI mismatch | load fails, message names both sides |
 | extension subscribes to an unknown hook | load fails, message lists known hooks |
 | duplicate extension name | registration fails (`DuplicateExtension`) |
 | hook raises / returns a bad payload | run fails with `extension: hook: message` |
 | extension panics | caught, reported as an extension error |
 | Python plugin raises | reported as an extension error (host stays up) |
 | child process dies | reported as a plugin error |
+| child process never answers | the request times out after 60s, reported as a plugin error |
 
 ## Threading and state
 

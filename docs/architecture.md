@@ -49,11 +49,14 @@ All four are documented in [`extensions.md`](extensions.md).
 2. `pipeline.input` is dispatched through the registry. Each subscribed
    extension receives the current payload and returns the next one.
 3. The core validates that `text` is still a string and computes the analysis
-   (words, characters, SHA-256 digest).
+   (words, characters, SHA-256 digest). That digest is kept as `input_digest`:
+   the identity of the text as it entered the stage.
 4. `pipeline.output` is dispatched with `{"analysis": {...}}`.
 5. The returned payload must still contain an `analysis` object; it is
-   deserialised back into `Analysis`.
-6. The caller gets `Run { analysis, trace }`, where `trace` lists
+   deserialised back into `Analysis`. Only its `text` is used.
+6. Words, characters and `digest` are derived again from that `text`, so they
+   always describe what is reported, whatever the extensions returned.
+7. The caller gets `Run { analysis, trace }`, where `trace` lists
    `extension: hook` entries in execution order.
 
 Failures are typed, never panics: `ExtensionError` for something an extension did

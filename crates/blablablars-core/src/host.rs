@@ -5,14 +5,23 @@
 //! embedding a Python interpreter.
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use serde_json::Value;
 
 use crate::error::CoreError;
 use crate::extension::{Extension, HOOKS};
 use crate::protocol::{PluginDescription, Request, Response, PROTOCOL_VERSION};
+
+/// How long a plugin has to answer one request.
+///
+/// Generous, because a hook may do real work, but finite: a plugin that never
+/// answers (a wedged interpreter, a program waiting on input) would otherwise
+/// hang the caller forever with the connection lock held.
+pub const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// An extension backed by a long-lived child process speaking the JSON protocol.
 ///
@@ -26,13 +35,31 @@ pub struct ProcessExtension {
 struct Connection {
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    /// The plugin's stdout, read on its own thread so a reply can be waited for
+    /// with a deadline. The thread ends when the pipe does.
+    replies: Receiver<std::io::Result<String>>,
     next_id: u64,
+    timeout: Duration,
 }
 
 impl ProcessExtension {
     /// Spawn `program` with `args`, then perform the `describe` handshake.
     pub fn spawn(program: &str, args: &[String]) -> Result<Self, CoreError> {
+        Self::spawn_with_timeout(program, args, REPLY_TIMEOUT)
+    }
+
+    /// [`spawn`](Self::spawn) with an explicit deadline for one answer, so a
+    /// test does not have to wait the production minute to see a hang.
+    pub fn spawn_with_timeout(
+        program: &str,
+        args: &[String],
+        timeout: Duration,
+    ) -> Result<Self, CoreError> {
+        // Resolved first, so the OS never looks in the current directory for it:
+        // a `process:` spec naming a bare program must not run one dropped in a
+        // repository the user happens to be in.
+        let program = crate::voice::platform::resolve_program(program);
+        let program = program.as_str();
         let mut child = Command::new(program)
             .args(args)
             .stdin(Stdio::piped())
@@ -50,11 +77,35 @@ impl ProcessExtension {
             CoreError::Plugin(format!("plugin `{program}` has no readable stdout"))
         })?;
 
+        let (sender, replies) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("blablablars-plugin".to_string())
+            .spawn(move || {
+                let mut reader = BufReader::new(stdout);
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        // End of the pipe: dropping the sender is the signal.
+                        Ok(0) => return,
+                        Ok(_) => {
+                            if sender.send(Ok(line)).is_err() {
+                                return;
+                            }
+                        }
+                        Err(error) => {
+                            let _ = sender.send(Err(error));
+                            return;
+                        }
+                    }
+                }
+            })?;
+
         let mut connection = Connection {
             child,
             stdin,
-            stdout: BufReader::new(stdout),
+            replies,
             next_id: 1,
+            timeout,
         };
 
         let value = connection.request(Request::describe(connection.next_id))?;
@@ -154,13 +205,26 @@ impl Connection {
         self.stdin.write_all(line.as_bytes())?;
         self.stdin.flush()?;
 
-        let mut reply = String::new();
-        if self.stdout.read_line(&mut reply)? == 0 {
-            return Err(CoreError::Plugin(format!(
-                "plugin closed its stdout before answering request {id} \
-                 (did it write something other than protocol JSON to stdout?)"
-            )));
-        }
+        let reply = match self.replies.recv_timeout(self.timeout) {
+            Ok(Ok(line)) => line,
+            Ok(Err(error)) => {
+                return Err(CoreError::Plugin(format!(
+                    "cannot read the plugin's answer to request {id}: {error}"
+                )))
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(CoreError::Plugin(format!(
+                    "plugin did not answer request {id} within {}s",
+                    self.timeout.as_secs()
+                )))
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(CoreError::Plugin(format!(
+                    "plugin closed its stdout before answering request {id} \
+                     (did it write something other than protocol JSON to stdout?)"
+                )))
+            }
+        };
 
         let response: Response = serde_json::from_str(reply.trim()).map_err(|error| {
             CoreError::Plugin(format!(
@@ -317,6 +381,28 @@ for line in sys.stdin:
             .unwrap_err();
         assert!(
             matches!(error, CoreError::Plugin(message) if message.contains("speaks protocol 999"))
+        );
+    }
+
+    #[test]
+    fn a_plugin_that_never_answers_is_an_error_not_a_wait() {
+        // `cat` reads stdin for ever and never writes: exactly the wedged
+        // plugin the deadline exists for.
+        let started = std::time::Instant::now();
+        let error = ProcessExtension::spawn_with_timeout(
+            "sh",
+            &["-c".to_string(), "cat > /dev/null".to_string()],
+            Duration::from_millis(300),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, CoreError::Plugin(message) if message.contains("did not answer")),
+            "{error}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "waited {:?}",
+            started.elapsed()
         );
     }
 

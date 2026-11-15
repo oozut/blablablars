@@ -48,21 +48,33 @@ impl DynamicExtension {
 
         // SAFETY: the symbol signature is the documented ABI entry point. Each
         // call creates a fresh instance, owned by this value until `Drop`.
-        let entry: libloading::Symbol<unsafe extern "C" fn() -> PluginVTable> =
-            unsafe { library.get(plugin_abi::ENTRY_POINT) }.map_err(|error| {
-                CoreError::Plugin(format!(
-                "`{}` is not a blablablars extension: no `blablablars_plugin_v1` symbol ({error})",
-                path.display()
-            ))
-            })?;
+        let entry: libloading::Symbol<unsafe extern "C" fn() -> PluginVTable> = unsafe {
+            library.get(plugin_abi::ENTRY_POINT)
+        }
+        .map_err(|error| CoreError::NotAnExtension {
+            path: path.display().to_string(),
+            detail: error.to_string(),
+        })?;
 
         let vtable = unsafe { entry() };
 
         if vtable.abi_version != ABI_VERSION {
+            // The table is not the one this build was compiled against, so
+            // `drop_instance` cannot be trusted either: the instance is left to
+            // the unload rather than released through a layout that may differ.
             return Err(CoreError::Plugin(format!(
                 "`{}` targets plugin ABI {}, this build speaks {ABI_VERSION}; rebuild the extension",
                 path.display(),
                 vtable.abi_version
+            )));
+        }
+
+        // A table with no instance is one that was never initialised, and every
+        // function below would be handed a null pointer.
+        if vtable.instance.is_null() {
+            return Err(CoreError::Plugin(format!(
+                "`{}` returned an entry point with no instance",
+                path.display()
             )));
         }
 

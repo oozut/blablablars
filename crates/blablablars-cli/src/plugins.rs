@@ -69,16 +69,40 @@ impl AttachOptions {
     }
 }
 
+/// Where a spec came from, because the two are treated differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// Named by the user: `--plugin`, `$BLABLABLARS_PLUGINS`, or the config file.
+    Named,
+    /// Found by scanning a directory, so not chosen one file at a time.
+    Scanned,
+}
+
 /// Build a pipeline with every plugin this invocation asks for.
 pub fn build(options: &AttachOptions) -> Result<Pipeline, CoreError> {
-    let specs = collect(options)?;
+    let collected = collect(options)?;
+    let specs: Vec<PluginSpec> = collected.iter().map(|(spec, _)| spec.clone()).collect();
 
     start_interpreter(&specs, &options.python_paths)?;
 
     let mut pipeline = Pipeline::new();
-    for spec in &specs {
-        attach(&mut pipeline, spec)
-            .map_err(|error| CoreError::Plugin(format!("cannot attach `{spec}`: {error}")))?;
+    for (spec, origin) in &collected {
+        match attach(&mut pipeline, spec) {
+            Ok(()) => {}
+            // A directory is scanned, not chosen: a library in it that does not
+            // export the entry point is skipped and said so, because a `.so` that
+            // is not a plugin (a C library sitting beside them) would otherwise
+            // take the whole directory down. Anything named explicitly is still
+            // an error: there, "not a plugin" is a mistake worth stopping for.
+            Err(error @ CoreError::NotAnExtension { .. }) if origin == &Origin::Scanned => {
+                eprintln!("warning: skipping `{spec}`: {error}");
+            }
+            Err(error) => {
+                return Err(CoreError::Plugin(format!(
+                    "cannot attach `{spec}`: {error}"
+                )))
+            }
+        }
     }
     Ok(pipeline)
 }
@@ -106,16 +130,22 @@ pub fn load(spec: &PluginSpec) -> Result<Arc<dyn Extension>, CoreError> {
     Ok(extension)
 }
 
-/// The specs this invocation uses, in attachment order.
-pub fn collect(options: &AttachOptions) -> Result<Vec<PluginSpec>, CoreError> {
-    let mut specs = options.specs.clone();
+/// The specs this invocation uses, in attachment order, each with its origin.
+fn collect(options: &AttachOptions) -> Result<Vec<(PluginSpec, Origin)>, CoreError> {
+    let named = |spec: PluginSpec| (spec, Origin::Named);
+    let mut specs: Vec<(PluginSpec, Origin)> =
+        options.specs.clone().into_iter().map(named).collect();
 
     if options.implicit {
         warn_about_legacy_environment();
         if let Some(text) = non_empty_env(ENV_SPECS) {
-            specs.extend(parse_specs(&text.to_string_lossy())?);
+            specs.extend(parse_specs(&text.to_string_lossy())?.into_iter().map(named));
         }
-        specs.extend(read_config(&config_file(options.config.as_deref())?)?);
+        specs.extend(
+            read_config(&config_file(options.config.as_deref())?)?
+                .into_iter()
+                .map(named),
+        );
     }
 
     let mut directories = options.directories.clone();
@@ -123,7 +153,11 @@ pub fn collect(options: &AttachOptions) -> Result<Vec<PluginSpec>, CoreError> {
         directories.extend(environment_directories(ENV_PLUGIN_PATH));
     }
     for directory in &directories {
-        specs.extend(specs_in_directory(directory)?);
+        specs.extend(
+            specs_in_directory(directory)?
+                .into_iter()
+                .map(|spec| (spec, Origin::Scanned)),
+        );
     }
 
     Ok(specs)
@@ -529,6 +563,76 @@ process:python3 -m blablablars.runtime p.py
                 (PluginKind::Python, std::ffi::OsString::from("b.py")),
             ]
         );
+    }
+
+    /// Some shared library on this machine that is certainly not an extension.
+    #[cfg(unix)]
+    fn system_library() -> Option<PathBuf> {
+        [
+            "/lib/x86_64-linux-gnu/libm.so.6",
+            "/usr/lib/x86_64-linux-gnu/libm.so.6",
+            "/lib/aarch64-linux-gnu/libm.so.6",
+            "/usr/lib/aarch64-linux-gnu/libm.so.6",
+            "/lib64/libm.so.6",
+            "/usr/lib/libm.so.6",
+            "/usr/lib/libSystem.B.dylib",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_file())
+    }
+
+    /// A directory holding one library that is not a plugin.
+    #[cfg(unix)]
+    fn directory_with_a_plain_library(name: &str) -> Option<(PathBuf, PathBuf)> {
+        let library = system_library()?;
+        let directory = scratch(name);
+        let extension = if cfg!(target_os = "macos") {
+            "dylib"
+        } else {
+            "so"
+        };
+        let path = directory.join(format!("libnotaplugin.{extension}"));
+        fs::copy(&library, &path).ok()?;
+        Some((directory, path))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_library_in_a_scanned_directory_that_is_not_an_extension_is_skipped() {
+        let Some((directory, _)) = directory_with_a_plain_library("scan-skip") else {
+            return;
+        };
+        let options = AttachOptions {
+            directories: vec![directory.clone()],
+            ..Default::default()
+        };
+
+        // The directory is scanned, so one stray `.so` beside the plugins must
+        // not take the whole directory down.
+        let pipeline = build(&options).expect("a plain library is skipped, not fatal");
+        assert!(pipeline.registry().is_empty());
+
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_named_library_that_is_not_an_extension_is_still_an_error() {
+        let Some((directory, path)) = directory_with_a_plain_library("scan-named") else {
+            return;
+        };
+        let options = AttachOptions {
+            specs: vec![PluginSpec::rust(path.to_string_lossy().into_owned()).unwrap()],
+            ..Default::default()
+        };
+
+        // Named by hand, "not a plugin" is a mistake worth stopping for.
+        let error = build(&options).unwrap_err().to_string();
+        assert!(error.contains("cannot attach"), "{error}");
+        assert!(error.contains("not a blablablars extension"), "{error}");
+
+        let _ = fs::remove_dir_all(&directory);
     }
 
     #[test]

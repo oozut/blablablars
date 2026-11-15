@@ -54,6 +54,7 @@ impl Recording {
     /// Start capturing. The microphone is open when this returns.
     pub fn start(config: &CaptureConfig) -> Result<Self, CoreError> {
         let (program, arguments) = capture_command(config)?;
+        let program = super::platform::resolve_program(&program);
 
         let mut command = Command::new(&program);
         command

@@ -28,6 +28,8 @@ class NativeModuleTests(unittest.TestCase):
         self.assertEqual(len(analysis.digest), 64)
         self.assertEqual(analysis.text, "héllo wörld")
         self.assertEqual(analysis.to_dict()["words"], 2)
+        # Nothing rewrote the text, so there is one identity, not two.
+        self.assertEqual(analysis.input_digest, analysis.digest)
 
     def test_analysis_equality(self) -> None:
         self.assertEqual(blablablars.analyse("a b"), blablablars.analyse("a b"))
@@ -47,6 +49,9 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(payload["analysis"]["characters"], 11)
         self.assertEqual(payload["trace"], [])
         self.assertEqual(len(payload["analysis"]["digest"]), 64)
+        self.assertEqual(
+            payload["analysis"]["input_digest"], payload["analysis"]["digest"]
+        )
 
     def test_run_json_rejects_payload_without_text(self) -> None:
         with self.assertRaises(ValueError):
@@ -152,6 +157,17 @@ class ExtensionTests(unittest.TestCase):
 
         result = blablablars.Pipeline([Redact()]).run("secret")
         self.assertEqual(result.analysis.text, "[redacted]")
+        # The derived fields describe what came back, so a redacting extension
+        # cannot leave a fingerprint of the secret in the digest...
+        self.assertEqual(result.analysis.words, 1)
+        self.assertEqual(result.analysis.characters, 10)
+        self.assertEqual(
+            result.analysis.digest, blablablars.analyse("[redacted]").digest
+        )
+        # ... and the input it started from is still named, under its own field.
+        self.assertEqual(
+            result.analysis.input_digest, blablablars.analyse("secret").digest
+        )
 
     def test_an_exception_in_a_handler_surfaces_as_a_runtime_error(self) -> None:
         class Broken(blablablars.Plugin):

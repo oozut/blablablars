@@ -708,20 +708,56 @@ pub fn session_file() -> Result<PathBuf, CoreError> {
     let directory = voice::platform::runtime_dir().ok_or_else(|| {
         CoreError::Voice("no runtime directory: set $XDG_RUNTIME_DIR or $TMPDIR".to_string())
     })?;
-    std::fs::create_dir_all(&directory)?;
+    // Only this user may enter it: the note names a port and carries the token
+    // that ends a recording, so a directory another account can write to is a
+    // way to redirect the shortcut (and to learn when it is pressed).
+    voice::platform::ensure_private_dir(&directory)?;
     Ok(directory.join(format!("dictate-{}.json", voice::platform::user_tag())))
 }
 
 fn write_session(path: &Path, session: &Session) -> Result<(), CoreError> {
     // Written beside and renamed, so a second press never reads half a note.
+    // `create_new` on a `0600` file: a planted symlink at the temporary name is
+    // refused instead of followed, and the token is not world-readable.
     let temporary = path.with_extension("json.tmp");
-    let note = serde_json::json!({ "port": session.port, "token": session.token });
-    std::fs::write(&temporary, serde_json::to_vec(&note)?)?;
+    let note = serde_json::to_vec(&serde_json::json!({
+        "port": session.port,
+        "token": session.token,
+    }))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = match options.open(&temporary) {
+        Ok(file) => file,
+        // A leftover from a session that died before its rename.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = std::fs::remove_file(&temporary);
+            options.open(&temporary)?
+        }
+        Err(error) => return Err(error.into()),
+    };
+    file.write_all(&note)?;
+    file.flush()?;
+    drop(file);
     std::fs::rename(&temporary, path)?;
     Ok(())
 }
 
 fn read_session(path: &Path) -> Option<Session> {
+    // A note another account could read or write is not ours, so it is ignored:
+    // the shortcut then starts a recording instead of trusting a planted port.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let metadata = std::fs::metadata(path).ok()?;
+        if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
+            return None;
+        }
+    }
     let bytes = std::fs::read(path).ok()?;
     let note: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     Some(Session {
@@ -746,12 +782,42 @@ fn request(session: &Session, request: Request) -> Option<String> {
 }
 
 /// A per-session secret, so another local process cannot stop the recording.
+///
+/// 128 bits from the operating system where it offers a file for them, and two
+/// rounds of the process's own randomly keyed hasher otherwise. The pid and the
+/// clock, which is what this used to be, are both easy for a local process to
+/// reproduce.
 fn make_token() -> String {
-    let nanos = std::time::SystemTime::now()
+    let mut bytes = [0u8; 16];
+    if !os_random(&mut bytes) {
+        let state = std::collections::hash_map::RandomState::new();
+        let mut hasher = std::hash::BuildHasher::build_hasher(&state);
+        std::hash::Hash::hash(&(std::process::id(), nanos()), &mut hasher);
+        bytes[..8].copy_from_slice(&std::hash::Hasher::finish(&hasher).to_le_bytes());
+        let mut hasher = std::hash::BuildHasher::build_hasher(&state);
+        std::hash::Hash::hash(&(nanos(), std::process::id()), &mut hasher);
+        bytes[8..].copy_from_slice(&std::hash::Hasher::finish(&hasher).to_le_bytes());
+    }
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(unix)]
+fn os_random(bytes: &mut [u8]) -> bool {
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(bytes))
+        .is_ok()
+}
+
+#[cfg(not(unix))]
+fn os_random(_bytes: &mut [u8]) -> bool {
+    false
+}
+
+fn nanos() -> u128 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or(0);
-    format!("{:x}{:x}", std::process::id(), nanos)
+        .unwrap_or(0)
 }
 
 fn wait_for_session(path: &Path) -> Result<(), CoreError> {
@@ -1035,4 +1101,83 @@ pub fn list_models(config_path: Option<&Path>, json: bool) -> Result<(), CoreErr
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh, private directory per test.
+    fn scratch(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("blb-note-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        voice::platform::ensure_private_dir(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_session_note_another_account_could_read_is_not_trusted() {
+        let directory = scratch("loose");
+        let path = directory.join("note.json");
+        let body = br#"{"port":9,"token":"0123456789abcdef0123456789abcdef"}"#;
+        std::fs::write(&path, body).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            // The token stops a recording, so a note another account can read
+            // is one that account can use: it is ignored, not obeyed.
+            assert!(read_session(&path).is_none());
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let session = read_session(&path).expect("our own note is trusted");
+        assert_eq!(session.port, 9);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_note_that_is_not_a_note_is_ignored_rather_than_fatal() {
+        let directory = scratch("garbage");
+        let path = directory.join("note.json");
+        std::fs::write(&path, b"not json").unwrap();
+        assert!(read_session(&path).is_none());
+        assert!(read_session(&directory.join("absent.json")).is_none());
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_token_is_wide_and_different_every_time() {
+        let first = make_token();
+        let second = make_token();
+        assert_eq!(first.len(), 32, "{first}");
+        assert!(first.chars().all(|c| c.is_ascii_hexdigit()), "{first}");
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn the_note_is_written_with_only_this_user_able_to_read_it() {
+        let directory = scratch("write");
+        let path = directory.join("note.json");
+        let session = Session {
+            port: 4242,
+            token: make_token(),
+        };
+        write_session(&path, &session).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "{mode:o}");
+        }
+        let read = read_session(&path).expect("what we wrote");
+        assert_eq!(read.port, 4242);
+        assert_eq!(read.token, session.token);
+        // The temporary name it is written under is gone, so a second press
+        // cannot read half a note.
+        assert!(!path.with_extension("json.tmp").exists());
+        let _ = std::fs::remove_dir_all(&directory);
+    }
 }

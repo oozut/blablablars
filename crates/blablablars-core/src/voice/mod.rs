@@ -259,13 +259,23 @@ impl Dictation {
         if argv.is_empty() {
             return;
         }
-        let program = argv.remove(0);
-        let _ = Command::new(program)
+        let program = platform::resolve_program(&argv.remove(0));
+        let Ok(mut child) = Command::new(program)
             .args(argv)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn();
+            .spawn()
+        else {
+            return;
+        };
+        // Reaped on a thread of its own. Feedback outlives nothing, but a child
+        // nobody waits for stays a zombie until this process exits.
+        let _ = std::thread::Builder::new()
+            .name("blablablars-feedback".to_string())
+            .spawn(move || {
+                let _ = child.wait();
+            });
     }
 
     /// Dispatch a text hook and return the payload's `text` field.

@@ -128,13 +128,24 @@ pub fn to_wav_bytes(audio: &Audio) -> Vec<u8> {
 }
 
 /// Write `audio` to `path` as a WAV file, creating parent directories.
+///
+/// The file is created exclusively and readable only by this user: a dictation
+/// is the user's speech, and a path that already exists — a planted symlink
+/// included — is refused rather than followed or overwritten.
 pub fn write_wav(path: &Path, audio: &Audio) -> Result<(), CoreError> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
         }
     }
-    let mut file = std::fs::File::create(path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
     file.write_all(&to_wav_bytes(audio))?;
     file.flush()?;
     Ok(())
@@ -270,9 +281,13 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("blb-audio-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("tone.wav");
+        let _ = std::fs::remove_file(&path);
         let audio = tone(3200);
 
         write_wav(&path, &audio).unwrap();
+        // Exclusive: a second write to the same path is refused, which is what
+        // keeps a planted file from being followed.
+        assert!(write_wav(&path, &audio).is_err());
         let read = read_wav(&path).unwrap();
 
         assert_eq!(read, audio);
